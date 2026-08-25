@@ -61,6 +61,7 @@ its brightfield measurements belong in a separate QuPath module.
 |---|---|---|
 | [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md) | **GENERATED CURRENT STATUS** | deterministic rendering of the machine-readable claim and route authority |
 | [`AUDIT_REMEDIATION_ROADMAP.md`](AUDIT_REMEDIATION_ROADMAP.md) | **PROPOSED** | three-track architecture, problem-to-remedy map, and measurable acceptance gates |
+| [`RUN_ROOT_INVENTORY_2026-08-25.md`](RUN_ROOT_INVENTORY_2026-08-25.md) | **READ-ONLY STRUCTURAL AUDIT** | sanitized inventory of relocated confocal, WSI, and H&E run artifacts and the authority rules derived from them |
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | **NARRATIVE HANDOFF** | historical locations, provisional operating point, corrected endpoint, open debt, and decisions; subordinate to the generated authority |
 | [`NEGATIVE_RESULTS.md`](NEGATIVE_RESULTS.md) | **VALIDATED** | AGER and KRT8 tested as discriminators and rejected, with the control-locked enrichment test that did it |
 | [`ECTOPIC_POD_ENDPOINT.md`](ECTOPIC_POD_ENDPOINT.md) | **SUPERSEDED as a specification; retained as the calibration record** | the endpoint sign in it is wrong. Read its banner: it lists section by section what still holds. |

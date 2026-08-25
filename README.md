@@ -240,17 +240,27 @@ $env:IFQ_WSI_OUTPUT = 'D:\IFQ_Runs\<run>'
 
 # Stage 2 — the same Fiji engine measures the tiles, sharded across cores
 .\scripts\Invoke-Stage2Sharded.ps1 -TilesDir 'D:\IFQ_Runs\<run>\slideA\tiles' `
-    -OutputRoot 'D:\IFQ_Runs\<run>\slideA' -Shards 5 -Krt5Threshold 300
+    -OutputRoot 'D:\IFQ_Runs\<run>\slideA' -Shards 5 `
+    -Krt5Threshold '<scanner-calibrated>' -AgerThreshold '<scanner-calibrated>' `
+    -T1aThreshold '<scanner-calibrated>'
+# On success this also publishes slideA\stage2_run_index.json.
 
 # Stage 3 — reconcile tiles back to one slide, then roll up to mice
 python aggregate_tiles_to_slide.py --slide-root 'D:\IFQ_Runs\<run>'
 python aggregate_to_mouse.py 'D:\IFQ_Runs\<run>\stats\slide_level_summary.csv'
 ```
 
-Stage 3 refuses to emit a summary when tiles are missing. Stage 2 does **not**
-set thresholds: pass calibrated values, or the engine falls back to per-tile
-adaptive Otsu, which on a mostly-background tile reports
-`KRT5_pod_area_frac ≈ 0.89`.
+Stage 3 consumes only the explicit hashed Stage 2 index. It refuses to emit an
+analytical summary when tiles are missing, shard assignments overlap, duplicate
+section/region identities exist, or an input, ROI, script, configuration,
+manifest, or summary hash has drifted. It also rejects an emitted additive
+marker column that is blank when the indexed panel signature declares that
+marker; a true measured zero must be written as `0`. Stage 2 does **not** set thresholds:
+pass calibrated values, or the engine falls back to per-tile adaptive Otsu,
+which on a mostly-background tile reports `KRT5_pod_area_frac ≈ 0.89`.
+Stage 4 also rejects stale/rejected slide tables, preserves unavailable
+panel-specific markers as blanks rather than zeros, and carries the indexed
+profile lineage into mouse- and group-level output.
 
 ### Requirements
 
@@ -268,8 +278,9 @@ adaptive Otsu, which on a mostly-background tile reports
 |---|---|
 | `IF_Quant_Pipeline.groovy` | The measurement engine. Every number comes from here. Changes to it are deliberately rare. |
 | `qupath_wsi_tile_export.groovy` | Stage 1 whole-slide front end: series selection, one global tissue detection, calibrated tiles with halos. Measures nothing. |
-| `scripts/Invoke-Stage2Sharded.ps1` | Stage 2 fan-out over tiles using NTFS hard links (no image data copied). |
-| `aggregate_tiles_to_slide.py` | Stage 3: tile → slide, with coverage reconciliation; refuses to summarise an incomplete slide. |
+| `scripts/Invoke-Stage2Sharded.ps1` | Stage 2 fan-out over locked NTFS hard-link inputs and a content-addressed engine snapshot; publishes a validated run index only after every shard reconciles. |
+| `scripts/build_stage2_run_index.py` / `schemas/stage2-run-index.schema.json` | Portable content-addressed declaration of the only Stage 2 artifacts allowed into Stage 3. |
+| `aggregate_tiles_to_slide.py` | Stage 3: declared tile/region outputs → slide, with hash, identity, coverage, and area reconciliation; recursive discovery is diagnostic-only. |
 | `aggregate_to_mouse.py` | Region → mouse → group, area-weighted. Reports `n_mice`. Computes no p-values on purpose. |
 | `endpoints/` | Relational endpoints (a relation *between* two markers) evaluated by boolean algebra on masks the engine already wrote. The engine is marker-wise and cannot express this; the endpoint scripts close that gap without modifying it. |
 | `config/endpoints/` | Endpoint specifications as reviewable, diffable data — including the superseded one and why it was superseded. |

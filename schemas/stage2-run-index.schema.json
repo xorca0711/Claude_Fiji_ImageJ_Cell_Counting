@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json",
+  "title": "IFQuant WSI Stage 2 run index",
+  "description": "Portable, content-addressed declaration of the Stage 2 outputs that may enter WSI Stage 3 aggregation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "index_type",
+    "status",
+    "generated_utc",
+    "slide_id",
+    "stage1_manifest_sha256",
+    "tile_manifest",
+    "stage2_script",
+    "resolved_config_sha256",
+    "measurement_profile_sha256",
+    "analytical_identity",
+    "declared_channel_signatures",
+    "tile_inputs",
+    "runs",
+    "coverage",
+    "index_sha256"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "index_type": {
+      "const": "ifquant_wsi_stage2_run_index"
+    },
+    "status": {
+      "const": "stage2_integrity_complete"
+    },
+    "generated_utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "slide_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "stage1_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "tile_manifest": {
+      "$ref": "#/$defs/tileManifestArtifact"
+    },
+    "stage2_script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/fileName" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "resolved_config_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "measurement_profile_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "analytical_identity": {
+      "const": "section_id|region|panel"
+    },
+    "declared_channel_signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/channelSignature" }
+    },
+    "tile_inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/tileInput" }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/run" }
+    },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    },
+    "index_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\:]+$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "csvArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "row_count"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "row_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "tileManifestArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "row_count", "tile_set_sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "row_count": { "type": "integer", "minimum": 1 },
+        "tile_set_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "channelSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["panel", "signature"],
+      "properties": {
+        "panel": { "$ref": "#/$defs/nonEmptyString" },
+        "signature": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*-[A-Za-z0-9.-]+(?:_C[1-9][0-9]*-[A-Za-z0-9.-]+)*$"
+        }
+      }
+    },
+    "tileInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tile_id", "tile", "roi"],
+      "properties": {
+        "tile_id": { "$ref": "#/$defs/nonEmptyString" },
+        "tile": { "$ref": "#/$defs/artifact" },
+        "roi": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "role",
+        "analysis_dir",
+        "samplesheet",
+        "expected_tile_ids",
+        "run_manifest",
+        "run_summary",
+        "manifest_status",
+        "process_exit_code",
+        "config_sha256",
+        "input_set_sha256",
+        "successful_input_count",
+        "failure_count",
+        "summary_identity_count"
+      ],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "role": { "enum": ["full", "shard"] },
+        "analysis_dir": { "$ref": "#/$defs/relativePath" },
+        "samplesheet": { "$ref": "#/$defs/csvArtifact" },
+        "expected_tile_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "run_manifest": { "$ref": "#/$defs/artifact" },
+        "run_summary": { "$ref": "#/$defs/csvArtifact" },
+        "manifest_status": { "const": "complete" },
+        "process_exit_code": { "const": 0 },
+        "config_sha256": { "$ref": "#/$defs/sha256" },
+        "input_set_sha256": { "$ref": "#/$defs/sha256" },
+        "successful_input_count": { "type": "integer", "minimum": 1 },
+        "failure_count": { "const": 0 },
+        "summary_identity_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_tile_count",
+        "declared_input_count",
+        "successful_input_count",
+        "summary_row_count",
+        "summary_identity_count",
+        "summary_identity_sha256"
+      ],
+      "properties": {
+        "expected_tile_count": { "type": "integer", "minimum": 1 },
+        "declared_input_count": { "type": "integer", "minimum": 1 },
+        "successful_input_count": { "type": "integer", "minimum": 1 },
+        "summary_row_count": { "type": "integer", "minimum": 1 },
+        "summary_identity_count": { "type": "integer", "minimum": 1 },
+        "summary_identity_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

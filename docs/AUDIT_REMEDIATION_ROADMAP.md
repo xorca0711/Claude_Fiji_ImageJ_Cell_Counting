@@ -40,6 +40,33 @@ record yet. This is a contract foundation, not a completed migration. Promotion
 requires route adapters plus aggregation integration tests; until then the
 legacy missing-to-zero and discovery risks remain open.
 
+**2026-08-25 engineering progress:** provenance-safe WSI aggregation is now
+implemented around a per-slide, content-addressed Stage 2 run index. The index
+binds explicit shard assignments, samplesheets, tile/ROI inputs, engine,
+run-manifest configuration, ordered declared channel mappings, manifests,
+summaries, and natural
+section/region identities. Stage 3 no longer recursively discovers analytical
+summaries, and rejected attempts cannot leave an older accepted CSV at the
+canonical filename. Synthetic multi-shard, partition, overlap, duplicate,
+partial-run, path, and tamper cases fail closed. This closes roadmap step 2 at
+the software-contract level only: no local WSI run is promoted, because every
+inventoried WSI Stage 1 run is capped (`coverage_complete=false`). The shared
+measurement-record adapter and source-metadata channel verification in step 3
+remain open. Step 3 is partially implemented in the legacy CSV route:
+non-finite and partially missing additive measurements fail, wholly unavailable
+panel-specific markers remain blank instead of becoming zero, an emitted blank
+marker column is rejected when the indexed panel signature declares that
+marker, and Stage 4
+requires uniform indexed provenance across every mouse in a panel.
+
+The current index does not yet bind external panel/marker-registry file bytes or
+per-image `__params.json` snapshots into the cross-slide measurement profile,
+and it does not normalize ImageJ/Bio-Formats/Java versions for cohort-level
+comparison. Arbitrary custom acquisition-label aliases also need a structured
+marker ID before signature-to-summary evaluability can be enforced beyond the
+built-in panel labels. Those are explicit provenance follow-ups before a
+custom-panel or scientific WSI cohort is promoted.
+
 | Track | Intended estimand | Required boundary |
 |---|---|---|
 | `area_wsi` | DAPI-independent whole-section area endpoint | global tissue and airway masks, modality-specific frozen profile, exhaustive coverage, exact pooled numerators and denominators |
@@ -178,12 +205,15 @@ they validate mechanics or science.
 
 ## Implementation order
 
-1. **Authority and contracts.** Generate current status from one JSON source;
+1. **Authority and contracts (foundation implemented).** Generate current status from one JSON source;
    validate privacy and critical claim states; introduce the shared record schema.
-2. **Provenance-safe aggregation.** Replace analytical recursive discovery with
+2. **Provenance-safe aggregation (implemented; prospective runs only).** Replace analytical recursive discovery with
    an explicit hashed Stage 2 run index and duplicate-key rejection.
-3. **Evaluability and channel order.** Stop missing-to-zero coercion and require
-   exact ordered channel metadata before index-based mapping.
+3. **Evaluability and channel order (partially implemented).** Missing-to-zero
+   coercion is blocked for additive panel-specific measurements and declared
+   channel order is exact. Shared-record adapters, external-config/parameter
+   snapshots, runtime-profile comparison, and source-metadata verification are
+   still open.
 4. **WSI masks and sampling.** Implement global tissue/airway masks and record
    exhaustive/probability sampling semantics.
 5. **Segmentation validation.** Implement the headless StarDist/classic benchmark
