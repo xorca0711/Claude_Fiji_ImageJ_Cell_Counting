@@ -66,9 +66,12 @@ record rather than deleting them, so neither gets re-derived.
 
 ### 4 · No genotype-level inference from a four-mouse design
 
-One animal per genotype × condition cell means genotype is confounded with
-condition: the difference between the two infected animals cannot be separated
-from the difference between those two animals.
+Genotype and condition are crossed in the terminal imaging cohort, but one
+day-28 imaged survivor per cell leaves no replication-based residual error.
+This is not an enrollment count. The difference between the two infected
+animals therefore cannot be separated from the difference between those two
+individual animals, and no genotype, condition, or interaction inference is
+supported.
 
 I decided this is prohibitive rather than a caveat to soften. The measurement
 behaves as expected and the infected/uninfected contrast is near-binary, but no

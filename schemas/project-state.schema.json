@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifquant-lung.invalid/schemas/project-state.schema.json",
+  "title": "IFQuant-Lung project authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "authority_revision",
+    "study_id",
+    "title",
+    "as_of",
+    "authority",
+    "evidence",
+    "analysis_population",
+    "study_design",
+    "claim_boundary",
+    "modalities",
+    "project_gates"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "../schemas/project-state.schema.json"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "authority_revision": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}\\.[1-9][0-9]*$"
+    },
+    "study_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "analysis_population": {
+      "$ref": "#/$defs/analysisPopulation"
+    },
+    "study_design": {
+      "$ref": "#/$defs/studyDesign"
+    },
+    "claim_boundary": {
+      "$ref": "#/$defs/claimBoundary"
+    },
+    "modalities": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "$ref": "#/$defs/modality"
+      }
+    },
+    "project_gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/gate"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stringList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_source",
+        "generated_status",
+        "schema",
+        "rule"
+      ],
+      "properties": {
+        "canonical_source": {
+          "const": "authority/project_state.json"
+        },
+        "generated_status": {
+          "const": "docs/generated/AUTHORITY_STATUS.md"
+        },
+        "schema": {
+          "const": "schemas/project-state.schema.json"
+        },
+        "rule": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "verified_on", "verification"],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "verified_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "verification": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "analysisPopulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "terminal_endpoint_population",
+        "additional_heterozygous_infected_deaths_disclosed",
+        "death_days",
+        "survival_analysis_performed",
+        "constraint"
+      ],
+      "properties": {
+        "terminal_endpoint_population": {
+          "const": "DAY_28_IMAGED_SURVIVORS"
+        },
+        "additional_heterozygous_infected_deaths_disclosed": {
+          "const": 2
+        },
+        "death_days": {
+          "const": "8-9_POST_INFECTION"
+        },
+        "survival_analysis_performed": {
+          "const": false
+        },
+        "constraint": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "studyDesign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "factorial_structure",
+        "population_scope",
+        "genotype_levels",
+        "condition_levels",
+        "terminal_imaged_animals_per_cell",
+        "biological_unit",
+        "inference_status",
+        "reasons"
+      ],
+      "properties": {
+        "factorial_structure": {
+          "const": "CROSSED_2X2"
+        },
+        "population_scope": {
+          "const": "DAY_28_IMAGED_SURVIVORS"
+        },
+        "genotype_levels": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "condition_levels": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "terminal_imaged_animals_per_cell": {
+          "const": 1
+        },
+        "biological_unit": {
+          "const": "mouse"
+        },
+        "inference_status": {
+          "const": "DESCRIPTIVE_ONLY_NO_GROUP_INFERENCE"
+        },
+        "reasons": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "permitted",
+        "prohibited"
+      ],
+      "properties": {
+        "permitted": {
+          "$ref": "#/$defs/stringList"
+        },
+        "prohibited": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "state",
+        "expected_fields",
+        "quantified_fields",
+        "endpoint",
+        "sampling_frame"
+      ],
+      "properties": {
+        "name": {
+          "const": "settled_external_csv_release"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "state": {
+          "const": "SETTLED"
+        },
+        "expected_fields": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quantified_fields": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endpoint": {
+          "const": "thresholded_total_KRT5_area_fraction"
+        },
+        "sampling_frame": {
+          "const": "selected_fields_nonprobability"
+        }
+      }
+    },
+    "fieldException": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_id",
+        "mouse_id",
+        "panel",
+        "field_order",
+        "release_state",
+        "included_in_quantified_count",
+        "comparability",
+        "constraint"
+      ],
+      "properties": {
+        "field_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "mouse_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "panel": {
+          "enum": [
+            "LEFT",
+            "RIGHT"
+          ]
+        },
+        "field_order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "release_state": {
+          "enum": [
+            "WHOLE_FIELD_TISSUE_OVERRIDE_INCLUDED",
+            "PARTIAL_FIELD_INCLUDED"
+          ]
+        },
+        "included_in_quantified_count": {
+          "type": "boolean"
+        },
+        "tissue_denominator_um2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "comparability": {
+          "enum": [
+            "NONCOMPARABLE_PENDING_COMPARABLE_TISSUE_ROI",
+            "PARTIAL_FLAG_REQUIRED"
+          ]
+        },
+        "constraint": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "range",
+        "status"
+      ],
+      "properties": {
+        "range": {
+          "enum": [
+            "H0-H3",
+            "H4+"
+          ]
+        },
+        "status": {
+          "enum": [
+            "ENGINEERING_QC_ONLY",
+            "UNVALIDATED_BLOCKED"
+          ]
+        }
+      }
+    },
+    "modality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "status",
+        "scope",
+        "evidence_basis",
+        "promotion_gate"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "confocal_selected_fields",
+            "he_histology",
+            "wsi_threshold_pilot"
+          ]
+        },
+        "label": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "SETTLED_WITH_COMPARABILITY_EXCEPTION",
+            "ENGINEERING_QC_ONLY",
+            "ENGINEERING_PILOT_ONLY"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_basis": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "release": {
+          "$ref": "#/$defs/release"
+        },
+        "field_exceptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fieldException"
+          }
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stage"
+          }
+        },
+        "tile_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "promotion_gate": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "acceptance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^G-[A-Z0-9-]+$"
+        },
+        "status": {
+          "enum": [
+            "OPEN_SCIENTIFIC_BLOCKER",
+            "OPEN_ENGINEERING_GATE",
+            "BLOCKED"
+          ]
+        },
+        "acceptance": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    }
+  }
+}

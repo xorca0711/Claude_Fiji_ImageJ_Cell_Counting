@@ -2,10 +2,12 @@
 
 [![repository validation](https://github.com/xorca0711/IFQuant-Lung/actions/workflows/ci.yml/badge.svg)](https://github.com/xorca0711/IFQuant-Lung/actions/workflows/ci.yml)
 
-**A reproducible pipeline for quantifying dysplastic KRT5⁺ repair in
-influenza-injured mouse lung from multiplex immunofluorescence.** Fiji is the
-sole measurement engine; QuPath handles whole-slide reading and tiling; Python
-aggregates to the animal; a Windows launcher fronts all of it for operators.
+**A reproducible pipeline for measuring multiplex lung immunofluorescence, with
+a current descriptive endpoint of total thresholded KRT5-positive area in
+selected fields.** Fiji is the fluorescence measurement engine; QuPath handles
+whole-slide reading and tiling; Python aggregates to the animal; a Windows
+launcher fronts all of it for operators. A dysplastic-alveolar endpoint remains
+a validation target, not an established result.
 
 Study question: does IFN-γ *ligand* knockout change the extent of dysplastic
 KRT5⁺ repair after PR8 influenza injury? Endpoint after Lin et al. 2024
@@ -44,6 +46,10 @@ cutoff had no opportunity to manufacture.
 **2 · A near-binary infected/uninfected separation — descriptive, not
 inferential.**
 
+These terminal tissue values describe the day-28 imaged survivors. Two
+additional heterozygous infected mice died on days 8–9 and were not included in
+the imaging endpoint; no survival analysis was performed.
+
 | mouse | genotype | condition | KRT5⁺ area | KRT5 pods |
 |---|---|---|---|---|
 | M2 | hom | PR8 | **14.11 %** | 1080 |
@@ -59,7 +65,8 @@ token in an ImageJ Binary Options macro string set `Prefs.blackBackground = fals
 *globally*, inverting `Fill Holes` so every nucleus not touching the image frame
 was erased. Nothing crashed; the output looked normal.
 
-> pooled over 79 fields: **152.5 → 15,393.3 nuclei/mm², a ~101× undercount**
+> pooled over the 79-field standard pre-repair run: **152.5 → 15,393.3
+> nuclei/mm², a ~101× undercount**
 
 Diagnosed by **replay to IoU = 1.0000** against the shipped mask — which pins a
 cause rather than suggesting one. Area outputs were then *measured* unaffected
@@ -79,9 +86,12 @@ The evaluator now **refuses to run** the corrected spec rather than dividing by 
 denominator it cannot build.
 
 **6 · The current design cannot test the genotype hypothesis.**
-n = 1 mouse per genotype × condition cell, so genotype is confounded with
-condition and the 14.11 vs 11.98 difference cannot be separated from M2 vs M4-1.
-The reference used n = 15 per group. Stated as prohibitive, not as a caveat.
+Genotype and condition are crossed in the terminal imaging cohort, but n = 1
+day-28 imaged survivor per genotype × condition cell leaves no replication-based
+error estimate. Genotype, condition, and their
+interaction therefore are not inferentially estimable, and the 14.11 vs 11.98
+difference cannot be separated from M2 vs M4-1. The reference used n = 15 per
+group. Stated as prohibitive, not as a caveat.
 
 ---
 
@@ -117,6 +127,8 @@ embedded engine has drifted from the version it claims equivalence to.
 
 | If you want… | Read |
 |---|---|
+| **Machine-readable current authority** | [`docs/generated/AUTHORITY_STATUS.md`](docs/generated/AUTHORITY_STATUS.md) |
+| **Audit-driven architecture and gates** | [`docs/AUDIT_REMEDIATION_ROADMAP.md`](docs/AUDIT_REMEDIATION_ROADMAP.md) |
 | **Current scientific state** — what is validated, exploratory, retracted | [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) |
 | **The algorithm** — routing, decision hierarchy, cutoff derivation, Z policy | [`WORKFLOW.md`](WORKFLOW.md) |
 | **Architecture, explorable** — pan/zoom, theme, focus views, export | [`docs/architecture.html`](docs/architecture.html) — download and open; GitHub shows source, not the render |
@@ -133,9 +145,9 @@ embedded engine has drifted from the version it claims equivalence to.
 
 | | |
 |---|---|
-| **Validated** | tile→slide reconciliation (2.1e-16) · launcher legacy equivalence (84 checks) · KRT5 cutoff from controls · the segmentation defect, its fix, and the measured area regression |
+| **Validated mechanically** | six-tile tile→slide reconciliation (2.1e-16) · launcher legacy equivalence · the segmentation defect, its fix, and the measured area regression |
 | **Descriptive only** | the four-animal KRT5⁺ area table above, as *per-animal* values. The **M2 vs M4-1 ordering is not** descriptive-only and is listed below |
-| **Exploratory** | AGER and T1α calls — both constitutively expressed, so no negative-control anchor exists; labelled `adaptive_otsu_exploratory` |
+| **Provisional / exploratory** | KRT5=300 rests on one sound control and must be re-derived; AGER and T1α calls have no negative-control anchor and are labelled `adaptive_otsu_exploratory` |
 | **Retracted / superseded** | AGER as a co-negativity marker · KRT8 as a discriminator · the KRT5⁺PDPN⁻ endpoint form |
 | **Not established** | **the M2 vs M4-1 KRT5 ordering** — the whole-section dominance curve crosses at threshold ≈400 and the swing across plausible thresholds (2.93 pp) exceeds the difference in dispute (2.13 pp); see [NEGATIVE_RESULTS §5](docs/NEGATIVE_RESULTS.md) · any genotype-level inference · a defensible corrected endpoint (executor implemented, T1A/PDPN uncalibrated and manual validation absent) · routes 1 and 2 end-to-end through the launcher UI |
 
@@ -268,8 +280,9 @@ adaptive Otsu, which on a mostly-background tile reports
 | `legacy/` | Non-authoritative archive. No threshold in it is current. |
 | `WORKFLOW.md` | Superseded as an entry point; see the banner at its top. |
 
-`docs/PROJECT_STATE.md` is the living scientific handoff. It was reconciled on
-2026-08-09; if a historical document disagrees with it, the living handoff wins.
+`docs/PROJECT_STATE.md` is a narrative historical handoff. Current release and
+claim status comes from `authority/project_state.json` and its generated view;
+any discrepancy must be resolved explicitly.
 
 ---
 
@@ -295,8 +308,9 @@ Two caveats that the image analysis cannot resolve, and does not pretend to:
   **receptor** KO. Keep an independent viral-clearance control (NP stain or
   qPCR) outside this pipeline; it does not correct for differences in viral
   load.
-- With one animal per genotype × condition cell, genotype and condition cannot
-  be separated at all. See "What is not established".
+- With one day-28 imaged survivor per genotype × condition cell, the terminal
+  imaging cohort has no replication-based error estimate. See "What is not
+  established"; this count is not the enrollment count.
 
 ### The endpoint, and its correction
 
@@ -523,10 +537,12 @@ happens before any test. `aggregate_to_mouse.py` does that collapse
 (area-weighted) and reports `n_mice`. It deliberately computes no p-values:
 export `mouse_level_summary.csv` and apply the appropriate test elsewhere.
 
-For the current batch that is moot. **n = 1 per genotype × condition cell, and
-genotype is confounded with condition.** The numbers in this repository describe
-individual animals and support no inference. Reporting them as group results
-would be wrong regardless of how they were computed.
+For the current terminal imaging cohort that is moot. **Genotype and condition
+are crossed, but n = 1 day-28 imaged survivor per genotype × condition cell
+leaves no replication-based error estimate.**
+The numbers in this repository describe individual animals and support no
+inference about genotype, condition, or their interaction. Reporting them as
+group results would be wrong regardless of how they were computed.
 
 ## Threshold-tuning workflow
 

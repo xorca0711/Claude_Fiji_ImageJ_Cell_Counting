@@ -168,7 +168,10 @@ All of these produced **plausible, wrong output with no error**. Assume more exi
    outline validation, not boolean plumbing, are now the top blockers.
 2. **DAPI is saturated at acquisition** (in-tissue p90 = 4095, 5–19 % clipped).
    Fixable only at the microscope — lower 405 gain. Permanently lossy if skipped.
-3. **n = 1 per genotype × condition.** Confounded; no statistics possible.
+3. **Terminal imaging n = 1 day-28 survivor per genotype × condition cell.**
+   The factors are crossed, but there is no replication-based residual error;
+   genotype, condition, and interaction inference are unavailable. Two further
+   heterozygous infected mice died on days 8–9, so this is not enrollment n.
    Reference used n = 15/group. **No software change fixes this.**
 4. **KRT5 = 300 rests on one clean control** (M6 has a LEFT-panel AGER staining
    failure confirmed by the PI — `frac>500` 0.0097 LEFT vs 0.289 RIGHT).

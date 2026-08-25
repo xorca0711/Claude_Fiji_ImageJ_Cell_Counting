@@ -1,0 +1,177 @@
+{
+  "$schema": "../schemas/project-state.schema.json",
+  "schema_version": "1.0.0",
+  "authority_revision": "2026-08-25.1",
+  "study_id": "ifquant-lung-g-surf-2026",
+  "title": "IFQuant-Lung G-SURF project authority",
+  "as_of": "2026-08-25",
+  "authority": {
+    "canonical_source": "authority/project_state.json",
+    "generated_status": "docs/generated/AUTHORITY_STATUS.md",
+    "schema": "schemas/project-state.schema.json",
+    "rule": "Edit the canonical JSON, validate it, and regenerate the status document; do not hand-edit generated status text."
+  },
+  "evidence": [
+    {
+      "artifact_id": "settled_csv_release_v1_0",
+      "sha256": "0bd690fdb37ca763810c7e8451a3d92f6ef951e4bfa4e69c6bc27512ae8d1dd7",
+      "verified_on": "2026-08-25",
+      "verification": "ALL_10_ARCHIVE_ENTRIES_READ_AND_CROSS_RECONCILED"
+    },
+    {
+      "artifact_id": "research_report_2026",
+      "sha256": "c982bc58af6c8ee89f595be025162bfd474d22ae0063028d66536c7f12cd57e9",
+      "verified_on": "2026-08-25",
+      "verification": "ALL_20_PAGES_EXTRACTED_RENDERED_AND_VISUALLY_INSPECTED"
+    },
+    {
+      "artifact_id": "supplementary_materials_2026",
+      "sha256": "efcb6308ece870af8383d78445515c8b2650ba8da7b1ebe66c624b8d8be5a270",
+      "verified_on": "2026-08-25",
+      "verification": "ALL_54_PAGES_EXTRACTED_RENDERED_AND_VISUALLY_INSPECTED"
+    },
+    {
+      "artifact_id": "poster_final_90x120cm",
+      "sha256": "3ae5ef4c000e44af0c6bd45147404048a22c7c958ac635d7927e9f73f1988f5d",
+      "verified_on": "2026-08-25",
+      "verification": "FULL_PAGE_AND_NINE_OVERLAPPING_DETAIL_REGIONS_VISUALLY_INSPECTED"
+    }
+  ],
+  "analysis_population": {
+    "terminal_endpoint_population": "DAY_28_IMAGED_SURVIVORS",
+    "additional_heterozygous_infected_deaths_disclosed": 2,
+    "death_days": "8-9_POST_INFECTION",
+    "survival_analysis_performed": false,
+    "constraint": "Day-28 tissue claims describe the imaged survivors. They do not describe all infected animals or estimate survival."
+  },
+  "study_design": {
+    "factorial_structure": "CROSSED_2X2",
+    "population_scope": "DAY_28_IMAGED_SURVIVORS",
+    "genotype_levels": [
+      "heterozygous",
+      "homozygous"
+    ],
+    "condition_levels": [
+      "infected",
+      "uninfected"
+    ],
+    "terminal_imaged_animals_per_cell": 1,
+    "biological_unit": "mouse",
+    "inference_status": "DESCRIPTIVE_ONLY_NO_GROUP_INFERENCE",
+    "reasons": [
+      "There is one day-28 imaged survivor in each genotype-by-condition cell; this is not an enrollment count.",
+      "The full interaction model has no residual degrees of freedom.",
+      "Selected imaging fields are nested observations and are not independent biological replicates."
+    ]
+  },
+  "claim_boundary": {
+    "permitted": [
+      "Describe thresholded KRT5 burden in the selected confocal fields for each imaged mouse.",
+      "Report field-level and mouse-level descriptive summaries with the sampling and denominator limitations attached.",
+      "Describe H&E and WSI work as engineering or image-QC development only."
+    ],
+    "prohibited": [
+      "Do not make genotype, condition, interaction, or population-level inferential claims.",
+      "Do not represent selected fields as whole-lung prevalence or unbiased whole-section sampling.",
+      "Do not claim a validated KRT5-positive and PDPN-positive dysplastic-alveolar endpoint.",
+      "Do not claim cross-panel same-cell colocalization.",
+      "Do not make immune-lineage or validated lesion claims from H&E or the WSI pilot."
+    ]
+  },
+  "modalities": [
+    {
+      "id": "confocal_selected_fields",
+      "label": "Confocal selected fields",
+      "status": "SETTLED_WITH_COMPARABILITY_EXCEPTION",
+      "scope": "Descriptive thresholded KRT5 measurements in selected fields only.",
+      "evidence_basis": "AUDITED_SETTLED_CSV_RELEASE_AND_SUBMISSION_DOCUMENTS",
+      "release": {
+        "name": "settled_external_csv_release",
+        "version": "1.0",
+        "state": "SETTLED",
+        "expected_fields": 80,
+        "quantified_fields": 80,
+        "endpoint": "thresholded_total_KRT5_area_fraction",
+        "sampling_frame": "selected_fields_nonprobability"
+      },
+      "field_exceptions": [
+        {
+          "field_id": "M4-2_LEFT_F06",
+          "mouse_id": "M4-2",
+          "panel": "LEFT",
+          "field_order": 6,
+          "release_state": "WHOLE_FIELD_TISSUE_OVERRIDE_INCLUDED",
+          "included_in_quantified_count": true,
+          "tissue_denominator_um2": 405000,
+          "comparability": "NONCOMPARABLE_PENDING_COMPARABLE_TISSUE_ROI",
+          "constraint": "The whole-field denominator is scientifically non-comparable with the normal auto-DAPI tissue denominators until a comparable tissue ROI is produced and validated."
+        },
+        {
+          "field_id": "M4-1_RIGHT_F07",
+          "mouse_id": "M4-1",
+          "panel": "RIGHT",
+          "field_order": 7,
+          "release_state": "PARTIAL_FIELD_INCLUDED",
+          "included_in_quantified_count": true,
+          "comparability": "PARTIAL_FLAG_REQUIRED",
+          "constraint": "Retain the partial-field flag in every field-level and aggregated derivative."
+        }
+      ],
+      "promotion_gate": "Replace or validate the whole-field tissue denominator with a tissue ROI that is comparable to the frozen auto-DAPI denominator, then rebuild and reconcile every derivative."
+    },
+    {
+      "id": "he_histology",
+      "label": "H&E histology",
+      "status": "ENGINEERING_QC_ONLY",
+      "scope": "H0-H3 engineering and image-QC artifacts only; H4 and later stages are unvalidated and blocked from scientific interpretation.",
+      "evidence_basis": "REPOSITORY_CONTRACT_AND_SUBMISSION_DOCUMENTS; DECLARED_LOCAL_R1_H4_PACKAGES_NOT_AVAILABLE_AT_CONFIGURED_PATHS",
+      "stages": [
+        {
+          "range": "H0-H3",
+          "status": "ENGINEERING_QC_ONLY"
+        },
+        {
+          "range": "H4+",
+          "status": "UNVALIDATED_BLOCKED"
+        }
+      ],
+      "promotion_gate": "Complete and independently review anatomy, lesion-candidate, topology, blinded-review, and section-to-mouse aggregation gates before any lesion claim."
+    },
+    {
+      "id": "wsi_threshold_pilot",
+      "label": "WSI threshold pilot",
+      "status": "ENGINEERING_PILOT_ONLY",
+      "scope": "Six-tile engineering pilot only; not a calibrated global biological endpoint.",
+      "evidence_basis": "REPOSITORY_DOCUMENTATION_AND_SUBMISSION_DOCUMENTS; GENERATING_PILOT_ARTIFACTS_NOT_INDEPENDENTLY_REVERIFIED",
+      "tile_count": 6,
+      "promotion_gate": "Demonstrate complete declared tile coverage, frozen modality-specific calibration, duplicate-safe aggregation, and an auditable tissue and airway reference space."
+    }
+  ],
+  "project_gates": [
+    {
+      "id": "G-CONTRACT-INTEGRATION",
+      "status": "OPEN_ENGINEERING_GATE",
+      "acceptance": "All three route adapters emit the versioned measurement record, aggregation validates eligibility before pooling, and integration fixtures reject unevaluable, duplicate, channel-mismatched, hash-drifted, failed, and rejected records."
+    },
+    {
+      "id": "G-CONFOCAL-DENOMINATOR",
+      "status": "OPEN_SCIENTIFIC_BLOCKER",
+      "acceptance": "M4-2 LEFT F06 has a reviewed tissue ROI comparable to the frozen auto-DAPI reference space, and all 80 field and aggregate rows reconcile exactly."
+    },
+    {
+      "id": "G-SAMPLING-INFERENCE",
+      "status": "OPEN_SCIENTIFIC_BLOCKER",
+      "acceptance": "Future prevalence claims use exhaustive or probability-based sampling and prospectively justified biological replication; the present release remains descriptive regardless of engineering completion."
+    },
+    {
+      "id": "G-HE-VALIDATION",
+      "status": "BLOCKED",
+      "acceptance": "H4 and later validation stages are completed with traceable review evidence before H&E is promoted beyond engineering and QC."
+    },
+    {
+      "id": "G-WSI-VALIDATION",
+      "status": "BLOCKED",
+      "acceptance": "The WSI workflow passes coverage, calibration, aggregation, and reference-space validation on data beyond the six-tile pilot."
+    }
+  ]
+}

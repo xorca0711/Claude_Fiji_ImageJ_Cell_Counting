@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xorca0711/IFQuant-Lung/schemas/measurement-record.schema.json",
+  "title": "IFQuant measurement record",
+  "description": "Shared fail-closed record contract for area WSI, confocal cell, and H&E pathology tracks. Schema conformance does not validate a biological endpoint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "track",
+    "record_level",
+    "identifiers",
+    "measurement_profile_id",
+    "channel_signature",
+    "segmentation_model",
+    "endpoint",
+    "sampling",
+    "compartment",
+    "provenance",
+    "qc"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "record_id": {"type": "string", "minLength": 1},
+    "track": {"enum": ["area_wsi", "cell_confocal", "he_pathology"]},
+    "record_level": {"enum": ["cell", "region", "field", "tile", "section", "slide", "mouse"]},
+    "identifiers": {"$ref": "#/$defs/identifiers"},
+    "measurement_profile_id": {"type": "string", "minLength": 1},
+    "channel_signature": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/channel"}
+    },
+    "segmentation_model": {
+      "oneOf": [
+        {"$ref": "#/$defs/segmentationModel"},
+        {"type": "null"}
+      ]
+    },
+    "endpoint": {"$ref": "#/$defs/endpoint"},
+    "sampling": {"$ref": "#/$defs/sampling"},
+    "compartment": {"$ref": "#/$defs/compartment"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "qc": {"$ref": "#/$defs/qc"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"track": {"const": "area_wsi"}}, "required": ["track"]},
+      "then": {
+        "properties": {
+          "record_level": {"enum": ["region", "tile", "section", "slide", "mouse"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"track": {"const": "cell_confocal"}}, "required": ["track"]},
+      "then": {
+        "properties": {
+          "record_level": {"enum": ["cell", "region", "field", "mouse"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"track": {"const": "he_pathology"}}, "required": ["track"]},
+      "then": {
+        "properties": {
+          "record_level": {"enum": ["region", "section", "slide", "mouse"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "track": {"const": "area_wsi"},
+          "record_level": {"not": {"const": "mouse"}}
+        },
+        "required": ["track", "record_level"]
+      },
+      "then": {"properties": {"identifiers": {"properties": {"slide_id": {"type": "string", "minLength": 1}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "track": {"const": "cell_confocal"},
+          "record_level": {"not": {"const": "mouse"}}
+        },
+        "required": ["track", "record_level"]
+      },
+      "then": {"properties": {"identifiers": {"properties": {"field_id": {"type": "string", "minLength": 1}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "track": {"const": "he_pathology"},
+          "record_level": {"not": {"const": "mouse"}}
+        },
+        "required": ["track", "record_level"]
+      },
+      "then": {
+        "properties": {
+          "identifiers": {
+            "anyOf": [
+              {"properties": {"slide_id": {"type": "string", "minLength": 1}}},
+              {"properties": {"section_id": {"type": "string", "minLength": 1}}}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "mouse"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "slide_id": {"type": "null"},
+              "section_id": {"type": "null"},
+              "field_id": {"type": "null"},
+              "tile_id": {"type": "null"},
+              "region_id": {"type": "null"},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "slide"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "slide_id": {"type": "string", "minLength": 1},
+              "section_id": {"type": "null"},
+              "field_id": {"type": "null"},
+              "tile_id": {"type": "null"},
+              "region_id": {"type": "null"},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "section"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "section_id": {"type": "string", "minLength": 1},
+              "field_id": {"type": "null"},
+              "tile_id": {"type": "null"},
+              "region_id": {"type": "null"},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "field"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "field_id": {"type": "string", "minLength": 1},
+              "tile_id": {"type": "null"},
+              "region_id": {"type": "null"},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "tile"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "tile_id": {"type": "string", "minLength": 1},
+              "region_id": {"type": "null"},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "region"}}, "required": ["record_level"]},
+      "then": {
+        "properties": {
+          "identifiers": {
+            "properties": {
+              "region_id": {"type": "string", "minLength": 1},
+              "cell_id": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"record_level": {"const": "cell"}}, "required": ["record_level"]},
+      "then": {"properties": {"identifiers": {"properties": {"cell_id": {"type": "string", "minLength": 1}}}}}
+    }
+  ],
+  "$defs": {
+    "nullableIdentifier": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"}
+      ]
+    },
+    "identifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mouse_id",
+        "slide_id",
+        "section_id",
+        "field_id",
+        "tile_id",
+        "region_id",
+        "cell_id"
+      ],
+      "properties": {
+        "mouse_id": {"type": "string", "minLength": 1},
+        "slide_id": {"$ref": "#/$defs/nullableIdentifier"},
+        "section_id": {"$ref": "#/$defs/nullableIdentifier"},
+        "field_id": {"$ref": "#/$defs/nullableIdentifier"},
+        "tile_id": {"$ref": "#/$defs/nullableIdentifier"},
+        "region_id": {"$ref": "#/$defs/nullableIdentifier"},
+        "cell_id": {"$ref": "#/$defs/nullableIdentifier"}
+      }
+    },
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "unit"],
+      "properties": {
+        "value": {
+          "oneOf": [
+            {"type": "number"},
+            {"type": "null"}
+          ]
+        },
+        "unit": {"type": "string", "minLength": 1}
+      }
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "label", "role"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1}
+      }
+    },
+    "segmentationModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model_id", "model_sha256", "profile_id"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint_id",
+        "calculation",
+        "reference_space_id",
+        "evaluability",
+        "numerator",
+        "denominator",
+        "value",
+        "unit",
+        "zero_is_observed",
+        "reason_code"
+      ],
+      "properties": {
+        "endpoint_id": {"type": "string", "minLength": 1},
+        "calculation": {"const": "ratio"},
+        "reference_space_id": {"type": "string", "minLength": 1},
+        "evaluability": {
+          "enum": ["measured", "not_evaluable", "not_applicable", "excluded"]
+        },
+        "numerator": {"$ref": "#/$defs/quantity"},
+        "denominator": {"$ref": "#/$defs/quantity"},
+        "value": {
+          "oneOf": [
+            {"type": "number"},
+            {"type": "null"}
+          ]
+        },
+        "unit": {"type": "string", "minLength": 1},
+        "zero_is_observed": {"type": "boolean"},
+        "reason_code": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"evaluability": {"const": "measured"}},
+            "required": ["evaluability"]
+          },
+          "then": {
+            "properties": {
+              "numerator": {"properties": {"value": {"type": "number"}}},
+              "denominator": {"properties": {"value": {"type": "number", "exclusiveMinimum": 0}}},
+              "value": {"type": "number"},
+              "reason_code": {"type": "null"}
+            }
+          },
+          "else": {
+            "properties": {
+              "numerator": {"properties": {"value": {"type": "null"}}},
+              "denominator": {"properties": {"value": {"type": "null"}}},
+              "value": {"type": "null"},
+              "zero_is_observed": {"const": false},
+              "reason_code": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"unit": {"const": "fraction"}},
+            "required": ["unit"]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "oneOf": [
+                  {"type": "number", "minimum": 0, "maximum": 1},
+                  {"type": "null"}
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["design", "inclusion_probability", "selection_source"],
+      "properties": {
+        "design": {"enum": ["exhaustive", "probability", "purposive", "unknown"]},
+        "inclusion_probability": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            {"type": "null"}
+          ]
+        },
+        "selection_source": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"design": {"const": "exhaustive"}},
+            "required": ["design"]
+          },
+          "then": {"properties": {"inclusion_probability": {"const": 1}}}
+        },
+        {
+          "if": {
+            "properties": {"design": {"const": "probability"}},
+            "required": ["design"]
+          },
+          "then": {
+            "properties": {
+              "inclusion_probability": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"design": {"enum": ["purposive", "unknown"]}},
+            "required": ["design"]
+          },
+          "then": {"properties": {"inclusion_probability": {"type": "null"}}}
+        }
+      ]
+    },
+    "compartment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "labels", "assignment_profile_id"],
+      "properties": {
+        "status": {"enum": ["assigned", "unassigned", "not_applicable"]},
+        "labels": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "assignment_profile_id": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "assigned"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "labels": {"minItems": 1},
+              "assignment_profile_id": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "labels": {"maxItems": 0},
+              "assignment_profile_id": {"type": "null"}
+            }
+          }
+        }
+      ]
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "provenanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "sha256"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code_revision", "config_sha256", "measurement_profile_sha256", "inputs", "run_id"],
+      "properties": {
+        "code_revision": {"type": "string", "minLength": 7},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "measurement_profile_sha256": {"$ref": "#/$defs/sha256"},
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/provenanceInput"},
+          "uniqueItems": true
+        },
+        "run_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason_codes", "review_status"],
+      "properties": {
+        "status": {"enum": ["pass", "warning", "fail", "not_run"]},
+        "reason_codes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "review_status": {"enum": ["not_required", "pending", "accepted", "rejected"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"enum": ["warning", "fail", "not_run"]}},
+            "required": ["status"]
+          },
+          "then": {"properties": {"reason_codes": {"minItems": 1}}}
+        }
+      ]
+    }
+  }
+}
