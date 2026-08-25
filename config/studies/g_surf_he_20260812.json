@@ -88,7 +88,7 @@
   ],
   "interpretation_constraints": [
     "This dataset supports pipeline development and descriptive paired-section analysis, not genotype-by-infection inference.",
-    "Genotype and infection are confounded at n=1 per design cell.",
+    "For the day-28 imaged H&E set, genotype and infection are crossed, but n=1 imaged survivor per design cell leaves no replication-based residual error or inferential genotype, infection, or interaction estimate; this is not enrollment n.",
     "The two analytical series per slide are technical sections, not biological replicates."
   ]
 }

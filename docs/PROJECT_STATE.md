@@ -1,8 +1,10 @@
 # Project state — living handoff
 
-> **Status: CURRENT.** This is the one document that is allowed to contradict an
-> older one. Where any other doc in `docs/` disagrees with this file, this file
-> wins and the other doc is stale — say so rather than reconciling silently.
+> **Status: NARRATIVE HANDOFF; subordinate to the project authority.** Current
+> release counts, claim boundaries, and promotion gates are defined in
+> `../authority/project_state.json` and rendered in
+> [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md). Resolve any
+> discrepancy explicitly; this prose does not overrule the authority record.
 >
 > Last reconciled against data and code: **2026-08-12**, against
 > `<LOCAL_RUN_ROOT>\confocal_260809_rerun`, `main` @ `e60b7e6`, the
@@ -22,13 +24,18 @@ is not.
   **QuPath measures nothing in either fluorescence route**; it reads and tiles
   whole slides. The proposed H&E route is a separate brightfield module and is
   still disabled.
-* Confocal data arrived 2026-08-08. **`IFQ_KRT5_THRESHOLD = 300` is calibrated**
-  from uninfected controls. AGER and T1A are **not** calibrated and every call
-  they make is labelled `adaptive_otsu_exploratory`.
-* The headline area result is real and reproducible: KRT5⁺ area 14.11% / 11.98%
-  in infected mice against 0.000% / 0.003% in uninfected controls.
-* **n = 1 mouse per genotype × condition cell, and genotype is confounded with
-  condition. No statistics are possible from this batch.** Anything that reads
+* Confocal data arrived 2026-08-08. **`IFQ_KRT5_THRESHOLD = 300` is a frozen,
+  provisional operating point** that now rests on one sound uninfected control
+  and must be re-derived. AGER and T1A are **not** calibrated and every call they
+  make is labelled `adaptive_otsu_exploratory`.
+* The selected-field descriptive values are reproducible: KRT5⁺ area 14.11% /
+  11.98% in the two day-28 imaged infected survivors against 0.000% / 0.003% in
+  the two imaged uninfected mice. Two additional heterozygous infected mice died
+  on days 8–9; no survival analysis was performed.
+* **The terminal imaging cohort has n = 1 day-28 imaged survivor per genotype ×
+  condition cell. Genotype and condition are crossed, but no replication-based
+  residual error exists, so genotype,
+  condition, and interaction inference are unavailable.** Anything that reads
   like a group comparison is a description of four animals, not a result.
 * H&E now has a **proposed, machine-readable decision hierarchy and endpoint
   contract**, plus an executed eight-section H0-H3 QuPath engineering pilot.
@@ -71,7 +78,8 @@ else was merged or retired on 2026-08-07; see [`BRANCHING.md`](BRANCHING.md).
 |---|---|---|
 | `<LOCAL_RUN_ROOT>\confocal_260808` | first confocal run; carries the `blackBackground` bug | **areas only**; every count in it is wrong |
 | `<LOCAL_RUN_ROOT>\confocal_260808_fixed` | re-run after the fix | **trusted result baseline** |
-| `<LOCAL_RUN_ROOT>\confocal_260809_rerun` | independent 2026-08-09 reproduction | **verification record** — 79-row run summary and both ordinary aggregate CSVs are byte-identical to `confocal_260808_fixed` |
+| `<LOCAL_RUN_ROOT>\confocal_260809_rerun` | independent 2026-08-09 pre-repair reproduction | **verification record** — its 79-row run summary and both ordinary aggregate CSVs are byte-identical to `confocal_260808_fixed` |
+| `<LOCAL_RUN_ROOT>\confocal_260809_settled_release` | reconciled 80-field release | **descriptive release with exceptions** — M4-2 LEFT F06 uses a non-comparable whole-field denominator and M4-1 RIGHT F07 retains a partial flag |
 | `<LOCAL_RUN_ROOT>\he_20260812\02_pilot_r2_od018` | eight-section H&E H0-H3 engineering pilot | **review overlays and pipeline development only** — no immune lineage or mouse-level biological result |
 | `<LOCAL_RUN_ROOT>\validated` / `superseded` | earlier WSI pilot outputs | provenance |
 | `<LOCAL_RUN_ROOT>\archive_202607_pre_revision` | 14 July runs (12.0 GB) moved off the system drive | provenance |
@@ -120,9 +128,9 @@ intersection/union algebra exactly.
 
 | item | status | evidence |
 |---|---|---|
-| WSI chain Stage 1→2→3 | **VALIDATED** | reconciliation to 2.1e-16; see [`WSI_TILING_WORKFLOW.md`](WSI_TILING_WORKFLOW.md) §10 |
+| WSI chain Stage 1→2→3 | **PARTLY VALIDATED (six-tile plumbing only)** | pilot reconciliation to 2.1e-16; no calibrated cohort-wide WSI endpoint; see [`WSI_TILING_WORKFLOW.md`](WSI_TILING_WORKFLOW.md) §10 |
 | mask-algebra endpoint module | **VALIDATED mechanically** | synthetic numerator 2, denominator 6, fraction 1/3; uncalibrated and retracted specs refused; real-data reconstruction worst rel. diff 3.285e-07 |
-| `IFQ_KRT5_THRESHOLD = 300` | **CALIBRATED**, one sound control | control p99.99 = 283 (M4-2) / 255 (M6); recorded as `fixed_predeclared` in both runs. **M6 LEFT is a staining failure, so this rests on M4-2 alone.** |
+| `IFQ_KRT5_THRESHOLD = 300` | **FROZEN PROVISIONAL OPERATING POINT**, one sound control | nominal control p99.99 = 283 (M4-2) / 255 (M6); recorded as `fixed_predeclared` in both runs. **M6 LEFT is a staining failure, so this rests on M4-2 alone and must be re-derived before confirmatory use.** |
 | `IFQ_AGER_THRESHOLD`, `IFQ_T1A_THRESHOLD` | **NOT CALIBRATED** | both run `adaptive_otsu_exploratory`; deliberately so — they are constitutively expressed, so "the control should be negative" gives no handle |
 | AGER damage detector (AGER 150, σ 40 µm, cutoff 0.14) | **RETIRED as the denominator** | it was locked from controls and the derivation is sound, but the reference's denominator is a **hand-traced union**, not a density detector. It solves a problem the reference does not have. |
 | PDPN ceiling t = 200 | **RETIRED** | derived as a co-*negativity* ceiling; the justification does not transfer to co-*positivity* |
@@ -156,11 +164,14 @@ uncalibratable. Pooled in-tissue 488 statistics:
 `IFQ_KRT5_THRESHOLD = 300` sits just above both control p99.99 values, so the
 false-positive area is ≤ 1e-4 in each control independently.
 
-**82 → 79 analysed.** Two `.oir` files are truncated at acquisition (7.3 and
-8.2 MB against a uniform 37.7 MB) and fail in both Bio-Formats paths; one field
-was refused by DAPI tissue detection rather than analysed as background. 13
-`Map_A01.oir` overviews were skipped by the engine's own guard. All three
-failures are data, not pipeline.
+**Standard run: 82 candidates → 79 analysed; settled release: 80/80 after one
+explicit repair.** Two noncanonical `.oir` files are truncated at acquisition
+(7.3 and 8.2 MB against a uniform 37.7 MB) and fail in both Bio-Formats paths.
+Canonical M4-2 LEFT F06 was refused by automatic DAPI tissue detection, then
+included in the settled release with a 405,000 µm² whole-field denominator.
+That restores row coverage but changes the reference space and remains a
+comparability exception. Thirteen `Map_A01.oir` overviews were skipped by the
+engine's own guard.
 
 ### The `blackBackground` bug — FOUND, FIXED, RE-VALIDATED
 
@@ -216,10 +227,12 @@ LEFT-panel area result below therefore survived the bug unchanged.
 Near-binary separation, and T1α area moves the right way (down in infected =
 AT1 loss).
 
-**Caveat, and it is the binding one: n = 1 mouse per genotype × condition cell.**
-Genotype is confounded with condition — there is no infected/uninfected pair
-within a genotype *and* no het/hom pair within a condition that is not also
-confounded by section. No statistics are possible from this batch. These four
+**Caveat, and it is the binding one: terminal imaging n = 1 day-28 imaged
+survivor per genotype × condition cell.** The analyzed endpoint set is a
+complete crossed 2 × 2, but each cell contains one survivor and there is no
+replication-based residual error. This is not enrollment n. Each within-genotype or
+within-condition contrast is also an individual-animal contrast. Genotype,
+condition, and interaction inference are therefore unavailable; these four
 numbers describe four animals.
 
 ### Markers tested and REJECTED

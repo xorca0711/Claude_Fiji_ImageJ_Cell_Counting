@@ -286,6 +286,9 @@ namespace IFQuantLauncher
             // analysis channel, each naming the engine's own variable.
             routeBox.SelectedIndex = 0;
             SelectChoice(panelBox, "LEFT");
+            SelectChoice(tissueModeBox, "auto");
+            SelectChoice(compartmentModeBox, "optional");
+            SelectChoice(wholeCompartmentBox, "unassigned");
             OnPanelChanged();
             PanelDef left = ResolveSelectedPanel();
             if (left == null) return 70;

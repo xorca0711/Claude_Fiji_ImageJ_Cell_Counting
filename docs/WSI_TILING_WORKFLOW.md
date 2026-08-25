@@ -11,7 +11,7 @@
 > * **This route has not been run on the current study data.** The confocal
 >   route was used instead. The 6-tile pilot is what validated the plumbing.
 >
-> Last checked: 2026-08-08.
+> Last checked against the relocated local run inventory: 2026-08-25.
 
 This document describes the slide-scanner route: quantifying an Olympus VS200
 `.vsi` whole-slide scan with the **unchanged** validated Fiji engine.
@@ -49,7 +49,8 @@ Stage 1   qupath_wsi_tile_export.groovy   .vsi  -> tiles/*.ome.tif
                                                 + stage1_manifest.json
 
 Stage 2   IF_Quant_Pipeline.groovy        tiles -> run_summary.csv
-          (Fiji headless, UNCHANGED)               (one row per tile)
+          (Fiji headless)                           (one or more region rows per tile)
+          build_stage2_run_index.py              + stage2_run_index.json
 
 Stage 3   aggregate_tiles_to_slide.py     tiles -> slide_level_summary.csv
 Stage 4   aggregate_to_mouse.py           slides -> mouse_level / group_level
@@ -251,8 +252,43 @@ Measured on the pilot: **~2–3 minutes per tile**. At ~370 tiles that is roughl
 the engine loops over files with a per-file try/catch and one bad tile never
 aborts the batch. Use `scripts/Invoke-Stage2Sharded.ps1` to split the tile
 folder into N hard-linked shards (hard links cost no disk) and run N Fiji
-processes. Stage 3 merges every `run_summary.csv` it finds under the slide
-folder, so sharding needs no further bookkeeping.
+processes. After all processes finish, the launcher writes a content-addressed
+`stage2_run_index.json`. It binds every shard's samplesheet, exit status,
+manifest, summary, tile/ROI hashes, run-manifest configuration, engine hash,
+and declared ordered channel signature. Stage 3 reads only those declared
+summaries. A sibling retry, partial output, or stale summary is never guessed.
+Before launch, the orchestrator writes a content-addressed engine snapshot and
+executes every shard from it. Read handles deny mutation of that snapshot,
+Stage 1 manifests, samplesheets, tiles, and ROIs until the validated index is
+published, so the recorded hashes refer to the bytes Fiji could actually read.
+
+The index counts coverage by unique tile/section IDs, not CSV rows. A
+partitioned tile may legitimately emit both damaged and intact region rows.
+Duplicate protection instead uses `(section_id, region, panel)`, so a retry
+cannot evade detection merely by changing `output_key`.
+
+For an unsharded run, create the same index explicitly:
+
+```powershell
+python .\scripts\build_stage2_run_index.py `
+  --slide-dir '<run>\<slide>' `
+  --stage1-manifest '<run>\stage1_manifest.json' `
+  --stage2-script '.\IF_Quant_Pipeline.groovy' `
+  --run 'analysis' 'tiles\samplesheet.csv' 0
+```
+
+The index's channel signature is the ordered mapping declared by the panel
+configuration. It does not yet prove that acquisition metadata labels match
+that mapping; exact source-metadata verification remains an open gate. The
+current cross-slide profile also does not bind external panel/registry file
+bytes, per-image `__params.json` snapshots, or a normalized
+ImageJ/Bio-Formats/Java runtime signature. Built-in-panel mechanics are covered;
+custom-panel and scientific cohort promotion require those additional hashes.
+Built-in acquisition labels are normalized to their summary IDs (for example,
+`Pro-SPC-488` to `PROSPC` and `T1alpha-647` to `T1A`). An arbitrary custom
+`fileLabel` alias still needs structured marker metadata; until that exists, the
+index also cannot safely classify every populated marker-like derived column as
+declared or undeclared.
 
 ## 8. Stage 3 — reconciliation
 
@@ -264,14 +300,39 @@ python .\aggregate_to_mouse.py D:\IFQ_Runs\<run_name>\stats\slide_level_summary.
 Stage 3 exists mainly to make silent loss impossible. It **refuses** to write
 `slide_level_summary.csv` when:
 
+* a slide lacks a valid `stage2_run_index.json`;
+* any declared artifact, tile/ROI, script, configuration, samplesheet,
+  manifest, or summary hash has drifted;
+* shard assignments overlap or do not exactly cover the tile manifest;
+* a duplicate `(section_id, region, panel)` identity exists;
+* an additive measurement is non-finite or only partly missing within a panel;
+* an emitted additive marker column is blank for a panel whose indexed channel
+  signature declares that marker (a measured zero must be written as `0`);
+* Stage 1 omitted a low-tissue candidate before `tile_manifest.csv`, or did not
+  record that count;
 * a tile in `tile_manifest.csv` has no `run_summary.csv` row;
 * `sum(region_area_um2)` differs from the Stage 1 core tissue area by >1%
   (which means the `_RoiSet.zip` files were not picked up);
 * Stage 1 recorded `coverage_complete=false` or `dry_run=true`.
 
 A slide missing 20 tiles still produces a perfectly plausible pod fraction, so
-this is fatal by default. `--allow-incomplete` writes a `.REJECTED.csv` for
-diagnosis only.
+this is fatal. Diagnostic rows are written only to
+`slide_level_summary.REJECTED.csv`; `--allow-incomplete` is retained as a
+deprecated compatibility spelling and can no longer publish rejected rows at
+the analytical filename. `--legacy-recursive-discovery` is likewise diagnostic-
+only. If a current attempt fails, any older canonical slide summary is moved to
+a hash-suffixed `.STALE` filename rather than left looking authoritative.
+Rejected dataset rows are themselves marked `PROBLEM`, and Stage 4 refuses both
+`.REJECTED` and `.STALE` inputs. Panel-specific markers that are absent from the
+indexed panel signature may remain blank through mouse/group output rather than
+becoming false zeros; blankness alone is never used to infer that absence.
+
+The 2026-08-25 run-root inventory found five WSI Stage 1 layouts and no complete
+whole-slide analytical run: all five record `coverage_complete=false`. The two
+Stage 2/3 layouts are engineering fixtures only. One contains six tiles and
+seven legitimate region rows; another contains an orphan partial retry beside
+the complete retry. Those layouts motivated the index rules but do not become
+scientific evidence by being indexable.
 
 Pooling reuses `aggregate_to_mouse.classify_columns()` so slide-level and
 mouse-level aggregation cannot drift. Fractions are always recomputed from

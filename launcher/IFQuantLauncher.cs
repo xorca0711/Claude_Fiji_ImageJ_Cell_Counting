@@ -20,8 +20,8 @@ using IFQuantLauncher.Routing;
 [assembly: AssemblyCompany("IF Quant Pipeline")]
 [assembly: AssemblyProduct("IF Quant Launcher")]
 [assembly: AssemblyCopyright("Research software")]
-[assembly: AssemblyVersion("1.9.4.0")]
-[assembly: AssemblyFileVersion("1.9.4.0")]
+[assembly: AssemblyVersion("1.9.5.0")]
+[assembly: AssemblyFileVersion("1.9.5.0")]
 
 namespace IFQuantLauncher
 {
@@ -494,7 +494,7 @@ namespace IFQuantLauncher
                     "required — Strict compartment gating",
                     "optional — Allow unassigned cells"
                 },
-                "required — Strict compartment gating",
+                "optional — Allow unassigned cells",
                 false);
             wholeCompartmentBox = MakeCombo(
                 new string[] { "unassigned", "airway", "alveolar", "tumor", "fibrotic", "stromal", "vascular", "immune", "ambiguous" },
@@ -1488,7 +1488,7 @@ namespace IFQuantLauncher
             SelectChoice(projectionBox, "layer_aware");
             singlePlaneBox.Value = -1;
             SelectChoice(tissueModeBox, "auto");
-            SelectChoice(compartmentModeBox, "required");
+            SelectChoice(compartmentModeBox, "optional");
             SelectChoice(wholeCompartmentBox, "unassigned");
             recursiveBox.Checked = true;
             includeRegexBox.Text = ".*";
@@ -2806,7 +2806,7 @@ namespace IFQuantLauncher
                 SelectChoice(projectionBox, GetValue(values, "projection", "layer_aware"));
                 SetNumeric(singlePlaneBox, GetValue(values, "single_plane", "-1"));
                 SelectChoice(tissueModeBox, GetValue(values, "tissue", "auto"));
-                SelectChoice(compartmentModeBox, GetValue(values, "compartment_mode", "required"));
+                SelectChoice(compartmentModeBox, GetValue(values, "compartment_mode", "optional"));
                 SelectChoice(wholeCompartmentBox, GetValue(values, "whole_compartment", "unassigned"));
                 recursiveBox.Checked = string.Equals(GetValue(values, "recursive", "true"), "true", StringComparison.OrdinalIgnoreCase);
                 includeRegexBox.Text = DecodeBase64(GetValue(values, "include_regex_b64", ""), ".*");
@@ -3631,6 +3631,27 @@ namespace IFQuantLauncher
                 FailClosedGate.Evaluate(armRequest, left, thresholdMarkers, armTools);
             if (armJvmGate.Blocked ||
                 HasCode(armJvmGate, "FIJI_ARM64_LAUNCHER_UNRELIABLE")) return 52;
+
+            // A whole-field ROI has no anatomical name of its own. Required
+            // gating with an unassigned override used to launch and fail every
+            // image; optional mode and an explicit reviewed type remain valid.
+            RunRequest impossibleAnatomy = NewLeftRequest(ImageRoute.IfConfocal);
+            impossibleAnatomy.TissueMode = "whole_field";
+            impossibleAnatomy.CompartmentMode = "required";
+            impossibleAnatomy.WholeFieldCompartment = "unassigned";
+            GateResult impossibleAnatomyGate =
+                FailClosedGate.Evaluate(impossibleAnatomy, left, thresholdMarkers, null);
+            if (!impossibleAnatomyGate.Blocked ||
+                !HasCode(impossibleAnatomyGate, "ANATOMY_REQUIRED_BUT_UNASSIGNED")) return 53;
+            impossibleAnatomy.CompartmentMode = "optional";
+            if (HasCode(FailClosedGate.Evaluate(
+                    impossibleAnatomy, left, thresholdMarkers, null),
+                    "ANATOMY_REQUIRED_BUT_UNASSIGNED")) return 53;
+            impossibleAnatomy.CompartmentMode = "required";
+            impossibleAnatomy.WholeFieldCompartment = "alveolar";
+            if (HasCode(FailClosedGate.Evaluate(
+                    impossibleAnatomy, left, thresholdMarkers, null),
+                    "ANATOMY_REQUIRED_BUT_UNASSIGNED")) return 53;
 
             RunRequest legacyArm = NewLeftRequest(ImageRoute.LegacyFiji172);
             legacyArm.Invocation = FijiInvocation.LauncherExe;

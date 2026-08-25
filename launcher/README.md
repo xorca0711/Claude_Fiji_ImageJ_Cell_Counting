@@ -1,12 +1,12 @@
 # IF Quant Windows launcher
 
-`IFQuantLauncher-v1.9.4.exe` is a Windows Forms front end for the analysis
+`IFQuantLauncher-v1.9.5.exe` is a Windows Forms front end for the analysis
 pipeline. It embeds the exact Groovy engine, marker registry, QuPath tiling
 script and Python reconciliation script present at build time. **It does not
 reimplement image analysis.** Every number it produces comes from
 `IF_Quant_Pipeline.groovy`, which is frozen.
 
-## What the four routes replaced (introduced v1.8.0; current source v1.9.4)
+## What the four routes replaced (introduced v1.8.0; current source v1.9.5)
 
 v1.7.2 assumed one kind of input: a folder of confocal/field images measured by
 Fiji. v1.8.0 makes the *kind of image* an explicit first choice, because the
@@ -118,8 +118,8 @@ self-test and never ran it.)
 Artifacts are written to the repository root and are **not committed** —
 `.exe` and its `.sha256.txt` sidecar belong in GitHub Releases:
 
-- `IFQuantLauncher-v1.9.4.exe`
-- `IFQuantLauncher-v1.9.4.sha256.txt`
+- `IFQuantLauncher-v1.9.5.exe`
+- `IFQuantLauncher-v1.9.5.sha256.txt`
 
 The build prints the SHA-256 of the exe and of each embedded artefact, so a
 shipped binary can be traced to the exact engine it carries.

@@ -10,7 +10,7 @@
   "source_run": "D:\\IFQ_Runs\\confocal_260809_rerun",
   "field_annotations": "D:\\IFQ_Runs\\confocal_region_map_260808\\metadata\\field_annotations.csv",
   "legacy_retouched_order": "D:\\IFQ_Runs\\confocal_region_map_260808\\metadata\\retouched_field_order_refixed.csv",
-  "reviewed_visual_root": "D:\\IFQ_Runs\\confocal_visual_panels_Retouch_79\\visual_merge_panels\\Confirm_with_internal_scalebars_v1_9_3_jpeg",
+  "reviewed_visual_root": "D:\\IFQ_Runs\\confocal_visual_panels_Retouch_80\\visual_merge_panels\\Confirm",
   "authoritative_deck": "D:\\260808-CW_confocal_acquisition_map_with_retouched_fields_refixed.pptx",
   "expected_mouse_count": 4,
   "expected_panels_per_mouse": 2,
@@ -70,8 +70,8 @@
       "mouse_id": "M4-2",
       "panel": "LEFT",
       "field_order": 6,
-      "qc_status": "MISSING_QUANTIFICATION",
-      "reason": "The settled engine run failed automatic DAPI tissue detection for this intended field. The reviewed visual panel remains display-only."
+      "qc_status": "WHOLE_FIELD_TISSUE_OVERRIDE_INCLUDED",
+      "reason": "Automatic DAPI tissue detection failed for this intended field. A single-field repair used explicit whole-field tissue handling with the original engine revision and locked KRT5 threshold 300; quantitative and endpoint area QC passed."
     }
   ],
   "interpretation_constraints": [

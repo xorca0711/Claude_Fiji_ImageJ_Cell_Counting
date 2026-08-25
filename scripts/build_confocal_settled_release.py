@@ -128,10 +128,12 @@ def load_study(config_path: Path) -> dict[str, Any]:
 
 def visual_index(root: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
-    for path in root.rglob("*.jpg"):
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
         output_key = path.name.split("__", 1)[0]
         if output_key in result:
-            fail(f"duplicate reviewed JPEG for output_key {output_key}")
+            fail(f"duplicate reviewed image for output_key {output_key}")
         result[output_key] = path
     return result
 
@@ -469,6 +471,7 @@ def build_release(config_path: Path, output_dir: Path) -> dict[str, Any]:
         record["inferential_statistics_allowed"] = False
         descriptive_mouse_rows.append(record)
 
+    success_count = sum(row["quantification_included"] for row in canonical_rows)
     endpoint_rows = [
         {
             "endpoint": "KRT5_pod_area",
@@ -504,7 +507,7 @@ def build_release(config_path: Path, output_dir: Path) -> dict[str, Any]:
             "endpoint": "contextual_negative_and_coexpression_calls",
             "panel": "LEFT_RIGHT",
             "status": "NOT_REPORTABLE",
-            "reason": "All 79 quantified rows have compartment=unassigned.",
+            "reason": f"All {success_count} quantified rows have compartment=unassigned.",
         },
         {
             "endpoint": "dysplastic_over_damaged",
@@ -536,7 +539,6 @@ def build_release(config_path: Path, output_dir: Path) -> dict[str, Any]:
     write_csv(artifact_paths["qc_exclusions_and_exceptions.csv"], qc_rows)
     write_csv(artifact_paths["endpoint_reportability.csv"], endpoint_rows)
 
-    success_count = sum(row["quantification_included"] for row in canonical_rows)
     partial_count = sum(row["partial_sensitivity_flag"] for row in canonical_rows)
     missing_count = expected_count - success_count
     source_files = {
@@ -600,6 +602,11 @@ def build_release(config_path: Path, output_dir: Path) -> dict[str, Any]:
         json.dump(release_manifest, handle, indent=2)
         handle.write("\n")
 
+    missing_detail = (
+        "- Missing canonical quantification: 0"
+        if missing_count == 0
+        else f"- Missing canonical quantification: {missing_count}"
+    )
     readme = f"""# G-SURF confocal 260808 settled release
 
 Status: **SETTLED DESCRIPTIVE RELEASE**
@@ -612,7 +619,7 @@ authoritative PowerPoint.
 
 - Intended reviewed fields: {expected_count}
 - Quantified canonical fields: {success_count}
-- Missing canonical quantification: {missing_count} (M4-2 LEFT field order 6)
+{missing_detail}
 - Quantified partial/truncated fields: {partial_count} (M4-1 RIGHT field order 7)
 - Noncanonical discovery candidates retained for audit: {len(extras)}
 - Reviewed display-only panels resolved: {len(reviewed_visuals)}
@@ -626,7 +633,7 @@ sampling units, not independent biological replicates. LEFT/RIGHT pairing is by
 reviewed field order only and does not imply pixel registration or same-cell
 colocalization.
 
-All 79 quantified rows are compartment-unassigned. Compartment-dependent
+All {success_count} quantified rows are compartment-unassigned. Compartment-dependent
 negative calls, coexpression classifications, and the corrected
 dysplastic-over-damaged endpoint remain not reportable. Reviewed panels and
 POD/NORMAL labels are display/stratification metadata and are not quantitative

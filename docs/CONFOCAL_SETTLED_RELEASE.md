@@ -89,14 +89,15 @@ substituted for unavailable variability.
 
 ## Current exceptions and interpretation boundary
 
-- Canonical quantitative coverage is 79/80.
-- M4-2 LEFT field order 6 is missing from quantification after DAPI tissue
-  detection failed. Its reviewed visual panel remains display-only.
+- Canonical quantitative coverage is 80/80.
+- M4-2 LEFT field order 6 was repaired after automatic DAPI tissue detection
+  failed. The repair used explicit whole-field tissue handling with the original
+  engine revision and locked KRT5 threshold 300; retain its QC override flag.
 - M4-1 RIGHT field order 7 is quantified but flagged partial/truncated; perform
   an inclusion/exclusion sensitivity check before using a RIGHT-panel summary.
 - LEFT/RIGHT pairing is by reviewed field order only. It is not pixel
   registration and cannot support same-cell colocalization.
-- All 79 quantified rows have `compartment=unassigned`. Compartment-dependent
+- All 80 quantified rows have `compartment=unassigned`. Compartment-dependent
   negative calls, coexpression classifications, and the corrected
   dysplastic-over-damaged endpoint remain not reportable.
 - With one mouse per genotype-condition design cell, group comparisons are

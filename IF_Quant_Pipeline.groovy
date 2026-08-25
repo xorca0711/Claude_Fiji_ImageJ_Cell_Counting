@@ -1159,7 +1159,23 @@ def bfOpen(String path) {
   opts.setColorMode(ImporterOptions.COLOR_MODE_GRAYSCALE)
   opts.setVirtual(false)
   opts.setAutoscale(false)
-  def imps = BF.openImagePlus(opts)
+  def imps
+  try {
+    imps = BF.openImagePlus(opts)
+  } catch (IllegalArgumentException t) {
+    // Bio-Formats/OIRReader uses OME PositiveInteger for SizeX/SizeY/SizeZ.
+    // An interrupted Olympus acquisition can retain a substantial file while
+    // declaring one of those dimensions as zero. Make that source-data defect
+    // actionable instead of exposing the opaque PositiveInteger exception.
+    if ((t.getMessage() ?: "").contains("must be non-null and strictly positive")) {
+      throw new IOException(
+        "Bio-Formats cannot read '" + new File(path).name +
+        "' because its microscope metadata declares a zero pixel dimension. " +
+        "The acquisition is incomplete or corrupt; re-export it from Olympus software " +
+        "or exclude it with a reviewed canonical field manifest.", t)
+    }
+    throw t
+  }
   if (imps == null || imps.length == 0) {
     throw new IOException("Bio-Formats returned no image series for: " + path)
   }
@@ -3880,8 +3896,8 @@ deliberatelySkippedFiles.each { f ->
     status: "skipped", skip_reason: "non_analytical_map_acquisition",
     message: "Microscope map/overview acquisition excluded before image analysis"
   ]
-canonicalExcludedFiles.each { f ->
 }
+canonicalExcludedFiles.each { f ->
   def relativePath = inDir.toPath().relativize(f.toPath()).toString()
   manifest.images << [
     file: f.name, relative_path: relativePath, output_key: null, panel: null,

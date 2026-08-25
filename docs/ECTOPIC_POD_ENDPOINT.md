@@ -37,7 +37,7 @@
 > | 7 | open questions | **STILL OPEN**, except the two-ROI RoiSet round trip, which the WSI pilot exercised. |
 > | morphometry | damaged/intact cross-check | **DIRECTIONAL ONLY.** Its MLI is inter-nuclear spacing, not the classical quantity — the document says so. |
 > | 9 | partition QC columns dropped at mouse level | **FIXED 2026-08-09.** Explicit additive classification and pooled-fraction regression tests; panel shape unchanged. |
-> | 8 | what this pilot can and cannot claim | **STILL TRUE**, and now sharper: n = 1 per cell, genotype confounded with condition. |
+> | 8 | what this pilot can and cannot claim | **CONCLUSION STILL TRUE; RATIONALE CORRECTED.** n = 1 per crossed design cell leaves no replication-based residual error. The factors are not structurally confounded. |
 > | 10 | whole-field region source + the 260808 endpoint run | **MECHANICALLY VALIDATED, WRONG ENDPOINT.** Read its own banner. |
 >
 > Everything below this line is preserved as written on 2026-08-07/08, except for
@@ -613,12 +613,12 @@ n = 1 mouse per group cell (het/hom × infected/uninfected). With n = mice as th
 statistical unit, this dataset supports pipeline validation and threshold
 freezing. It does not support a group comparison.
 
-> **[CORRECTION 2026-08-08] Sharper than that.** Genotype is *confounded with
-> condition* in this batch: there is no infected/uninfected pair within a
-> genotype that is not also a different section, and no het/hom pair within a
-> condition that is not the same. **No statistics are possible from this batch at
-> all** — not merely underpowered ones. Any table of four mice is a description
-> of four animals.
+> **[CORRECTION 2026-08-25]** The earlier correction used “confounded”
+> incorrectly. Genotype and condition form a complete crossed 2 × 2, but each
+> cell contains one mouse, leaving no replication-based residual error. Each
+> apparent factor contrast is also an individual-animal contrast. Genotype,
+> condition, and interaction inference are unavailable; any four-mouse table is
+> descriptive.
 
 Separately: `het` is likely the control rather than a second genotype arm — a
 heterozygous *Ifng*⁺/⁻ often retains enough cytokine to signal normally. Confirm

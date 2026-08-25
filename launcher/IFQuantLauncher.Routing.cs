@@ -53,8 +53,8 @@ namespace IFQuantLauncher.Routing
         // Version 1.9.4 fixes native ARM64 detection and prevents modern routes
         // from using Fiji's ARM64 launcher executable, which can exit 0 without
         // running the script or writing a manifest.
-        public const string Version = "1.9.4";
-        public const string AssemblyVersion = "1.9.4.0";
+        public const string Version = "1.9.5";
+        public const string AssemblyVersion = "1.9.5.0";
 
         // =============================================================
         // >>> THE ONE LINE THAT RE-ENABLES ROUTE 3 (H&E / brightfield) <<<
@@ -1271,7 +1271,7 @@ namespace IFQuantLauncher.Routing
         public string Projection = "layer_aware";
         public int SinglePlane = -1;
         public string TissueMode = "auto";
-        public string CompartmentMode = "required";
+        public string CompartmentMode = "optional";
         public string WholeFieldCompartment = "unassigned";
         public bool Recursive = true;
         public string IncludeRegex = ".*";
@@ -1466,6 +1466,21 @@ namespace IFQuantLauncher.Routing
                     Severity.Block, "PYTHON_MISSING",
                     "Stage 3 (aggregate_tiles_to_slide.py) is the only path from tile rows to a " +
                     "slide-level number. Without Python the run would stop at unreconciled tiles."));
+
+            // Strict gating needs an independently supplied anatomical label.
+            // whole_field always names its sole ROI "whole_field", so leaving the
+            // override unassigned makes every image fail after the expensive import.
+            if (request.Route != ImageRoute.LegacyFiji172 &&
+                string.Equals(request.TissueMode, "whole_field", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(request.CompartmentMode, "required", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(request.WholeFieldCompartment, "unassigned", StringComparison.OrdinalIgnoreCase))
+            {
+                result.Findings.Add(new GateFinding(
+                    Severity.Block, "ANATOMY_REQUIRED_BUT_UNASSIGNED",
+                    "Strict anatomical gating cannot be combined with Tissue boundary = whole_field " +
+                    "and Whole-image tissue type = unassigned. Choose the reviewed tissue type, or " +
+                    "set Anatomical gate to optional for an exploratory context-unresolved run."));
+            }
 
             // ---------------------------------------------------------
             // H1. IFQ_PANEL defaults to "T"

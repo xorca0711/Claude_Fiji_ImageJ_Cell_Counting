@@ -58,10 +58,13 @@ No third-party dependencies (standard library only).
 import argparse
 import csv
 import glob
+import hashlib
+import io
 import json
 import math
 import os
 import sys
+from pathlib import Path
 from collections import defaultdict
 
 # Reuse the validated pooling classification so slide-level and mouse-level
@@ -73,28 +76,140 @@ except ImportError:  # pragma: no cover
     sys.exit("ERROR: aggregate_to_mouse.py must sit beside this script "
              "(its column classification is reused so pooling cannot drift).")
 
+try:
+    from ifquant.stage2_index import (
+        Stage2IndexError,
+        additive_column_marker_ids,
+        declared_marker_ids,
+        sha256_file,
+        validate_stage2_index,
+    )
+except ImportError:  # pragma: no cover
+    sys.exit("ERROR: the ifquant package must be importable beside this script")
+
 # Identity columns carried through to the slide row.
 CARRY = ["mouse_id", "genotype", "condition", "panel"]
 
 
 def read_csv_rows(path):
-    with open(path, newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None:
-            return [], []
-        rows = [r for r in reader if any((v or "").strip() for v in r.values())]
-        return reader.fieldnames, rows
+    header, rows, _ = read_csv_rows_snapshot(path)
+    return header, rows
 
 
-def find_run_summaries(slide_dir):
-    """Stage 2 may be sharded across several output folders; collect them all."""
+def read_csv_rows_snapshot(path):
+    """Parse and hash one immutable byte snapshot of a CSV artifact."""
+    payload = Path(path).read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    text = payload.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if reader.fieldnames is None:
+        return [], [], digest
+    if len(reader.fieldnames) != len(set(reader.fieldnames)):
+        raise ValueError(f"{path} contains duplicate CSV header columns")
+    rows = []
+    for row_number, row in enumerate(reader, start=2):
+        if None in row:
+            raise ValueError(
+                f"{path} row {row_number} has more fields than its header"
+            )
+        if not all(value is None or isinstance(value, str) for value in row.values()):
+            raise ValueError(f"{path} row {row_number} contains a non-text CSV value")
+        if any((value or "").strip() for value in row.values()):
+            rows.append(row)
+    return reader.fieldnames, rows, digest
+
+
+def numeric_integrity_problems(rows, columns, declared_markers_by_panel=None):
+    """Reject missing, malformed, or non-finite values in additive measures.
+
+    Indexed WSI runs are checked panel by panel.  A wholly blank marker column
+    is structurally unavailable only when its marker is absent from that
+    panel's declared channel signature.  A declared acquisition channel alone
+    does not imply a particular measurement role, so this check applies only
+    to additive marker columns that the Stage 2 schema actually emits.
+    """
+    problems = []
+    if declared_markers_by_panel is None:
+        panel_groups = [(None, rows, None)]
+    else:
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[(row.get("panel") or "").strip()].append(row)
+        panel_groups = []
+        for panel, panel_rows in sorted(grouped.items()):
+            declared = declared_markers_by_panel.get(panel)
+            if declared is None:
+                problems.append(
+                    f"panel {panel!r} has no marker contract in the validated "
+                    "Stage 2 channel signatures"
+                )
+                declared = set()
+            panel_groups.append((panel, panel_rows, set(declared)))
+
+    for panel, panel_rows, declared_markers in panel_groups:
+        for column in columns:
+            missing, invalid = 0, []
+            numeric = []
+            dependencies = additive_column_marker_ids(column)
+            for index, row in enumerate(panel_rows, start=1):
+                raw = row.get(column)
+                token = "" if raw is None else str(raw).strip()
+                if token == "" or token.upper() in {"NA", "N/A"}:
+                    missing += 1
+                    continue
+                value = _num(token)
+                if value is None:
+                    invalid.append((index, token))
+                else:
+                    numeric.append(value)
+            context = f" in panel {panel!r}" if panel is not None else ""
+            if invalid:
+                problems.append(
+                    f"additive column {column!r}{context} contains {len(invalid)} "
+                    f"invalid/non-finite value(s), examples={invalid[:3]}")
+            if missing == len(panel_rows):
+                required_by_panel = (
+                    declared_markers is not None
+                    and bool(dependencies)
+                    and dependencies.issubset(declared_markers)
+                )
+                if column in {"region_area_um2", "n_nuclei"} or required_by_panel:
+                    reason = (
+                        " despite every referenced marker being declared by the "
+                        "indexed panel signature"
+                        if required_by_panel else ""
+                    )
+                    problems.append(
+                        f"additive column {column!r}{context} is missing for all rows"
+                        f"{reason}"
+                    )
+                # A union schema may include marker measurements from another
+                # panel.  The explicit signature, rather than blankness alone,
+                # is the authority for treating those fields as inapplicable.
+                continue
+            if missing:
+                problems.append(
+                    f"additive column {column!r}{context} is missing in "
+                    f"{missing}/{len(panel_rows)} row(s); partial measurements "
+                    "cannot be coerced to zero")
+            if column == "region_area_um2":
+                nonpositive = [value for value in numeric if value <= 0]
+                if nonpositive:
+                    problems.append(
+                        f"region_area_um2{context} must be positive for every row; "
+                        f"found {len(nonpositive)} non-positive value(s)")
+    return problems
+
+
+def find_run_summaries_legacy(slide_dir):
+    """Diagnostic-only recursive discovery retained for investigating old runs."""
     hits = sorted(glob.glob(os.path.join(slide_dir, "**", "run_summary.csv"), recursive=True))
     return [h for h in hits if os.path.getsize(h) > 0]
 
 
 def load_stage1_manifest(path):
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    payload = Path(path).read_bytes()
+    return json.loads(payload.decode("utf-8-sig")), hashlib.sha256(payload).hexdigest()
 
 
 def read_stage2_manifests(analysis_dirs):
@@ -147,7 +262,9 @@ def collect_cell_centroids(analysis_dirs, manifest_by_section):
     missing_cells = 0
     paths = []
     for d in analysis_dirs:
-        paths.extend(glob.glob(os.path.join(d, "**", "*__cells.csv"), recursive=True))
+        # A declared Stage 2 output writes cells one directory below its analysis
+        # root. Never recurse into abandoned retries nested beneath that root.
+        paths.extend(glob.glob(os.path.join(d, "*", "*__cells.csv")))
     for cells_path in sorted(set(paths)):
         # output folder name is <mouse>_<condition>_<panel>_<section_id>[__hash]
         folder = os.path.basename(os.path.dirname(cells_path))
@@ -211,7 +328,9 @@ def estimate_seam_duplicates(centroids, merge_dist_um):
 
 # --------------------------------------------------------------------------
 def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
-                    seam_dup, n_cells, stage2_failures=0, stage2_reasons=()):
+                    seam_dup, n_cells, stage2_failures=0, stage2_reasons=(),
+                    stage2_provenance=None, integrity_problems=(),
+                    declared_markers_by_panel=None):
     """Sum tile rows into one slide row, after reconciling coverage."""
     cats = classify_columns(header)
 
@@ -232,7 +351,24 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
     missing = sorted(expected - got)
     extra = sorted(got - expected)
 
-    problems = []
+    problems = list(integrity_problems)
+    problems.extend(numeric_integrity_problems(
+        tile_rows, cats["sum_cols"], declared_markers_by_panel
+    ))
+    natural_keys = []
+    for row in tile_rows:
+        natural_keys.append(tuple((row.get(c) or "").strip()
+                                  for c in ("section_id", "region", "panel")))
+    duplicate_keys = []
+    seen_keys = set()
+    for key in natural_keys:
+        if key in seen_keys and key not in duplicate_keys:
+            duplicate_keys.append(key)
+        seen_keys.add(key)
+    if duplicate_keys:
+        problems.append(
+            f"{len(duplicate_keys)} duplicate section-region-panel analytical identity "
+            f"key(s) detected: {duplicate_keys[:4]}")
     if missing:
         detail = ""
         if stage2_reasons:
@@ -253,8 +389,35 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
                         "(IFQ_WSI_MAX_TILES_PER_SLIDE was set) -- this is a smoke test, not an analysis.")
     if stage1_slide is not None and stage1_slide.get("dry_run", False):
         problems.append("Stage 1 recorded dry_run=true -- no tiles were actually exported.")
+    if stage1_slide is not None:
+        skipped_low_tissue = stage1_slide.get("n_skipped_low_tissue")
+        if skipped_low_tissue is None:
+            problems.append(
+                "Stage 1 did not record n_skipped_low_tissue; exhaustive candidate coverage "
+                "cannot be established.")
+        else:
+            try:
+                skipped_low_tissue = int(skipped_low_tissue)
+            except (TypeError, ValueError):
+                problems.append("Stage 1 n_skipped_low_tissue is not an integer.")
+            else:
+                if skipped_low_tissue > 0:
+                    problems.append(
+                        f"Stage 1 omitted {skipped_low_tissue} low-tissue candidate tile(s) "
+                        "before tile_manifest.csv; their identities/areas are unavailable.")
 
-    rec = {"slide": slide_name}
+    rec = {"slide": slide_name, "aggregation_contract_version": "2.0.0"}
+    provenance = stage2_provenance or {}
+    rec["stage2_source_mode"] = provenance.get("stage2_source_mode", "unknown")
+    rec["stage2_index_sha256"] = provenance.get("stage2_index_sha256", "")
+    rec["stage1_manifest_sha256"] = provenance.get("stage1_manifest_sha256", "")
+    rec["tile_manifest_sha256"] = provenance.get("tile_manifest_sha256", "")
+    rec["stage2_script_sha256"] = provenance.get("stage2_script_sha256", "")
+    rec["resolved_config_sha256"] = provenance.get("resolved_config_sha256", "")
+    rec["measurement_profile_sha256"] = provenance.get("measurement_profile_sha256", "")
+    rec["ordered_channel_signature"] = provenance.get("ordered_channel_signature", "")
+    rec["channel_signature_authority"] = provenance.get(
+        "channel_signature_authority", "unverified")
     for c in CARRY:
         vals = {(r.get(c) or "").strip() for r in tile_rows if (r.get(c) or "").strip()}
         if len(vals) > 1:
@@ -273,36 +436,29 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
     # parenchyma only, so region_area_um2 -- and therefore every fraction derived
     # from it here and again in aggregate_to_mouse.py -- uses the damaged area as
     # the denominator, which is the endpoint definition.
+    applicable_sum_cols = [
+        c for c in cats["sum_cols"]
+        if any(
+            str(r.get(c) or "").strip().upper() not in {"", "NA", "N/A"}
+            for r in tile_rows
+        )
+    ]
     sums = {}
-    for c in cats["sum_cols"]:
+    for c in applicable_sum_cols:
         vals = [_num(r.get(c)) for r in endpoint_rows]
         vals = [v for v in vals if v is not None]
-        sums[c] = sum(vals) if vals else 0.0
+        if vals:
+            sums[c] = math.fsum(vals)
     for c, v in sums.items():
         rec[c] = v
 
     total_area = sums.get("region_area_um2", 0.0)
 
-    # KNOWN LIMITATION -- these columns do NOT reach mouse level.
-    # aggregate_to_mouse.classify_columns() builds sum_cols as a CLOSED WHITELIST
-    # of name suffixes (aggregate_to_mouse.py:184-186) and writes rec[] only from
-    # that set; every other column is silently discarded. Verified empirically:
-    # damaged_area_um2, intact_area_um2, damaged_fraction_of_parenchyma,
-    # <M>_pod_area_um2_in_intact and <M>_pod_area_frac_of_intact are all absent
-    # from mouse_level_summary.csv.
-    #
-    # The PRIMARY ENDPOINT is unaffected: region_area_um2 carries the damaged
-    # area when partitioned, and <M>_pod_area_um2 matches the whitelist, so
-    # pod-area-over-damaged-area survives and is recomputed from pooled
-    # numerators correctly.
-    #
-    # What is lost is per-mouse QC: "% of lung damaged" and the KRT5-in-intact
-    # tripwire stop at slide level. Fixing it properly means emitting one row per
-    # denominator SCOPE rather than one row per slide, because
-    # aggregate_to_mouse hard-wires every area fraction to sum(region_area_um2)
-    # and KEY_COLS (line 43) does not include `region`, so damaged and intact
-    # rows would otherwise be summed into a single mouse row.
-    # See docs/ECTOPIC_POD_ENDPOINT.md section 9.
+    # Preserve both additive compartment areas and the intact-compartment pod
+    # area. Stage 4 recognizes these explicit columns, pools them independently,
+    # and recomputes their fractions at mouse level; it never averages these
+    # per-slide fractions or folds intact area into the damaged endpoint
+    # denominator.
     rec["partitioned"] = "true" if partitioned else "false"
     if partitioned:
         def _area(rows):
@@ -316,7 +472,7 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
         # KRT5 in the INTACT compartment is a QC readout, not the endpoint:
         # dysplastic pods should sit in damaged parenchyma. A large value here
         # means the damage mask, the KRT5 threshold, or both are wrong.
-        for c in cats["pod_area"]:
+        for c in (column for column in cats["pod_area"] if column in sums):
             m = marker_of(c, "_pod_area_um2")
             iv = sum(v for v in (_num(r.get(c)) for r in intact_rows) if v is not None)
             rec[f"{m}_pod_area_um2_in_intact"] = iv
@@ -324,12 +480,12 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
 
     # Recompute every derived quantity from POOLED numerators. Never average
     # per-tile fractions: tiles differ in tissue area.
-    for c in cats["pod_area"]:
+    for c in (column for column in cats["pod_area"] if column in sums):
         m = marker_of(c, "_pod_area_um2")
         rec[f"{m}_pod_area_frac"] = (sums[c] / total_area) if total_area > 0 else 0.0
         npods = sums.get(f"{m}_n_pods", 0.0)
         rec[f"{m}_mean_pod_area_um2"] = (sums[c] / npods) if npods > 0 else 0.0
-    for c in cats["positive_area"]:
+    for c in (column for column in cats["positive_area"] if column in sums):
         m = marker_of(c, "_positive_area_um2")
         rec[f"{m}_positive_area_frac"] = (sums[c] / total_area) if total_area > 0 else 0.0
 
@@ -345,12 +501,26 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
     # Reconciliation uses EVERY row. damaged + intact partition the tile core, so
     # their sum must still equal the Stage 1 core area even when the endpoint
     # denominator above is only the damaged part.
-    all_area = sum(v for v in (_num(r.get("region_area_um2")) for r in tile_rows) if v is not None)
+    all_area = math.fsum(
+        v for v in (_num(r.get("region_area_um2")) for r in tile_rows) if v is not None)
     # Prefer the rasterised area: the engine measures ROI pixels, so that is the
     # like-for-like comparison. Fall back for manifests written before it existed.
     key = ("core_raster_area_um2" if manifest_rows and "core_raster_area_um2" in manifest_rows[0]
            else "core_tissue_area_um2")
-    manifest_core_um2 = sum(float(r[key]) for r in manifest_rows)
+    manifest_core_values = []
+    for row_index, row in enumerate(manifest_rows, start=1):
+        try:
+            value = float(row[key])
+        except (KeyError, TypeError, ValueError):
+            problems.append(
+                f"tile manifest {key} row {row_index} is missing or nonnumeric")
+            continue
+        if not math.isfinite(value) or value <= 0:
+            problems.append(
+                f"tile manifest {key} row {row_index} must be finite and positive")
+            continue
+        manifest_core_values.append(value)
+    manifest_core_um2 = math.fsum(manifest_core_values)
     rec["stage1_core_tissue_area_um2"] = manifest_core_um2
     rec["stage1_area_column"] = key
     rec["stage2_region_area_um2"] = all_area
@@ -382,19 +552,34 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
 
 
 def write_csv(path, rows):
-    if not rows:
-        open(path, "w").close()
-        return
-    cols = []
-    for r in rows:
-        for c in r:
-            if c not in cols:
-                cols.append(c)
-    with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", newline="", encoding="utf-8") as fh:
+            if rows:
+                cols = []
+                for r in rows:
+                    for c in r:
+                        if c not in cols:
+                            cols.append(c)
+                w = csv.DictWriter(fh, fieldnames=cols)
+                w.writeheader()
+                for r in rows:
+                    w.writerow(r)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def quarantine_if_exists(path):
+    """Move a stale canonical output aside without destroying its bytes."""
+    if not os.path.isfile(path):
+        return None
+    digest = sha256_file(Path(path))[:12]
+    stem, extension = os.path.splitext(path)
+    stale = f"{stem}.STALE.{digest}{extension}"
+    os.replace(path, stale)
+    return stale
 
 
 def main():
@@ -405,6 +590,13 @@ def main():
     ap.add_argument("--stage1-manifest", default=None,
                     help="stage1_manifest.json (default: <slide-root>/stage1_manifest.json)")
     ap.add_argument("--outdir", default=None, help="output folder (default: <slide-root>/stats)")
+    ap.add_argument(
+        "--stage2-script",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "IF_Quant_Pipeline.groovy"),
+        help="exact Fiji engine used by Stage 2 (hash must match every run index)")
+    ap.add_argument("--stage2-index-name", default="stage2_run_index.json",
+                    help="per-slide index filename (default: stage2_run_index.json)")
     ap.add_argument("--seam-merge-um", type=float, default=4.0,
                     help="two centroids from different tiles closer than this are treated as "
                          "one nucleus clipped at a seam (default 4.0 um, ~one nuclear radius)")
@@ -412,43 +604,212 @@ def main():
                     help="'report' measures seam count inflation and records it (default); "
                          "'off' skips reading per-cell CSVs. Counts are NOT silently altered.")
     ap.add_argument("--allow-incomplete", action="store_true",
-                    help="emit slide rows even when tiles are missing (NOT for analysis)")
+                    help="deprecated compatibility flag; rejected rows remain diagnostic-only")
+    ap.add_argument(
+        "--legacy-recursive-discovery", action="store_true",
+        help="inspect recursively discovered legacy summaries, but only emit a REJECTED "
+             "diagnostic table; this can never produce analytical output")
     args = ap.parse_args()
 
     root = os.path.abspath(args.slide_root)
     if not os.path.isdir(root):
         sys.exit(f"ERROR: --slide-root not found: {root}")
-    manifest_path = args.stage1_manifest or os.path.join(root, "stage1_manifest.json")
-    stage1 = load_stage1_manifest(manifest_path) if os.path.isfile(manifest_path) else None
-    if stage1 is None:
-        print(f"WARNING: {manifest_path} not found; Stage 1 provenance checks are disabled.")
-    stage1_by_stem = {s["slide_stem"]: s for s in (stage1 or {}).get("slides", [])}
-
     outdir = args.outdir or os.path.join(root, "stats")
     os.makedirs(outdir, exist_ok=True)
+    out_path = os.path.join(outdir, "slide_level_summary.csv")
+    manifest_path = args.stage1_manifest or os.path.join(root, "stage1_manifest.json")
+    if not os.path.isfile(manifest_path):
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit(f"ERROR: Stage 1 manifest is required: {manifest_path}")
+    try:
+        stage1, stage1_snapshot_sha256 = load_stage1_manifest(manifest_path)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit(f"ERROR: Stage 1 manifest is unreadable: {manifest_path}: {exc}")
+    if not isinstance(stage1, dict):
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit(f"ERROR: Stage 1 manifest root must be a JSON object: {manifest_path}")
+    stage1_slides = stage1.get("slides")
+    if not isinstance(stage1_slides, list) or not stage1_slides:
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit("ERROR: Stage 1 manifest must declare a non-empty slides array")
+    declared_stems = [
+        str(slide.get("slide_stem") or "").strip()
+        for slide in stage1_slides if isinstance(slide, dict)
+    ]
+    if (len(declared_stems) != len(stage1_slides)
+            or any(not stem or os.path.basename(stem) != stem or stem in {".", ".."}
+                   for stem in declared_stems)
+            or len(declared_stems) != len(set(declared_stems))):
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit("ERROR: Stage 1 slide_stem values must be unique, non-empty directory names")
+    stage1_by_stem = {
+        stem: slide for stem, slide in zip(declared_stems, stage1_slides)
+    }
+    stage2_script = os.path.abspath(args.stage2_script)
+    if not os.path.isfile(stage2_script):
+        stale = quarantine_if_exists(out_path)
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        sys.exit(f"ERROR: --stage2-script not found: {stage2_script}")
+    if args.allow_incomplete:
+        print("WARNING: --allow-incomplete is deprecated. Failed rows are written only to "
+              "slide_level_summary.REJECTED.csv and never to the analytical filename.")
 
     slide_rows, all_problems = [], []
-    for entry in sorted(os.listdir(root)):
+    actual_manifest_stems = {
+        entry for entry in os.listdir(root)
+        if os.path.isfile(os.path.join(root, entry, "tile_manifest.csv"))
+    }
+    declared_manifest_stems = set(stage1_by_stem)
+    for entry in sorted(declared_manifest_stems - actual_manifest_stems):
+        msg = (f"{entry}: Stage 1 declares this slide, but its directory or "
+               "tile_manifest.csv is missing")
+        print("ERROR: " + msg)
+        all_problems.append(msg)
+    for entry in sorted(actual_manifest_stems - declared_manifest_stems):
+        msg = f"{entry}: tile_manifest.csv exists, but Stage 1 does not declare this slide"
+        print("ERROR: " + msg)
+        all_problems.append(msg)
+
+    for entry in sorted(declared_manifest_stems & actual_manifest_stems):
         slide_dir = os.path.join(root, entry)
         tm_path = os.path.join(slide_dir, "tile_manifest.csv")
         if not os.path.isfile(tm_path):
             continue
-        _, manifest_rows = read_csv_rows(tm_path)
+        try:
+            manifest_header, manifest_rows, manifest_snapshot_sha256 = (
+                read_csv_rows_snapshot(tm_path)
+            )
+        except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+            msg = f"{entry}: tile_manifest.csv is unreadable or malformed: {exc}"
+            print("ERROR: " + msg)
+            all_problems.append(msg)
+            continue
+        if "section_id" not in manifest_header:
+            msg = f"{entry}: tile_manifest.csv is missing required section_id"
+            print("ERROR: " + msg)
+            all_problems.append(msg)
+            continue
         if not manifest_rows:
-            print(f"WARNING: {tm_path} has no rows; skipping {entry}")
+            msg = f"{entry}: tile_manifest.csv has no rows"
+            print("ERROR: " + msg)
+            all_problems.append(msg)
             continue
 
-        summaries = find_run_summaries(slide_dir)
+        integrity_problems = []
+        if args.legacy_recursive_discovery:
+            summaries = find_run_summaries_legacy(slide_dir)
+            analysis_dirs = sorted({os.path.dirname(s) for s in summaries})
+            stage2_provenance = {
+                "stage2_source_mode": "legacy_recursive_diagnostic",
+                "channel_signature_authority": "unverified",
+            }
+            integrity_problems.append(
+                "legacy recursive Stage 2 discovery is ambiguous and diagnostic-only; "
+                "build an explicit hashed stage2_run_index.json")
+            declared_markers_by_panel = None
+        else:
+            index_path = os.path.join(slide_dir, args.stage2_index_name)
+            if not os.path.isfile(index_path):
+                msg = (f"{entry}: missing required Stage 2 index {index_path}. "
+                       "No run_summary.csv was guessed.")
+                print("ERROR: " + msg)
+                all_problems.append(msg)
+                continue
+            try:
+                validated_index = validate_stage2_index(
+                    Path(index_path),
+                    slide_dir=Path(slide_dir),
+                    stage1_manifest=Path(manifest_path),
+                    stage2_script=Path(stage2_script),
+                )
+            except (OSError, Stage2IndexError) as exc:
+                msg = f"{entry}: invalid Stage 2 index: {exc}"
+                print("ERROR: " + msg)
+                all_problems.append(msg)
+                continue
+            summaries = [str(path) for path in validated_index.summary_paths]
+            analysis_dirs = [str(path) for path in validated_index.analysis_dirs]
+            index_document = validated_index.document
+            if stage1_snapshot_sha256 != index_document["stage1_manifest_sha256"]:
+                msg = (
+                    f"{entry}: loaded Stage 1 manifest byte snapshot does not match "
+                    "the validated Stage 2 index"
+                )
+                print("ERROR: " + msg)
+                all_problems.append(msg)
+                continue
+            if manifest_snapshot_sha256 != index_document["tile_manifest"]["sha256"]:
+                msg = (
+                    f"{entry}: tile_manifest.csv byte snapshot does not match the "
+                    "validated Stage 2 index"
+                )
+                print("ERROR: " + msg)
+                all_problems.append(msg)
+                continue
+            signatures = ";".join(
+                f"{item['panel']}={item['signature']}"
+                for item in index_document["declared_channel_signatures"])
+            declared_markers_by_panel = {
+                item["panel"]: {
+                    marker
+                    for marker in declared_marker_ids(item["signature"])
+                    if marker != "DAPI"
+                }
+                for item in index_document["declared_channel_signatures"]
+            }
+            stage2_provenance = {
+                "stage2_source_mode": "explicit_hashed_index",
+                "stage2_index_sha256": index_document["index_sha256"],
+                "stage1_manifest_sha256": index_document["stage1_manifest_sha256"],
+                "tile_manifest_sha256": index_document["tile_manifest"]["sha256"],
+                "stage2_script_sha256": index_document["stage2_script"]["sha256"],
+                "resolved_config_sha256": index_document["resolved_config_sha256"],
+                "measurement_profile_sha256": index_document["measurement_profile_sha256"],
+                "ordered_channel_signature": signatures,
+                "channel_signature_authority": "declared_panel_mapping_not_source_verified",
+            }
         if not summaries:
-            msg = (f"{entry}: no non-empty run_summary.csv found under {slide_dir}. "
+            msg = (f"{entry}: no non-empty run_summary.csv found in the selected source. "
                    "Stage 2 has not run, or every tile failed.")
             print("ERROR: " + msg)
             all_problems.append(msg)
             continue
 
+        expected_summary_hashes = {}
+        if not args.legacy_recursive_discovery:
+            expected_summary_hashes = {
+                str((Path(slide_dir) / run["run_summary"]["path"]).resolve()):
+                    run["run_summary"]["sha256"]
+                for run in index_document["runs"]
+            }
         header, tile_rows = [], []
         for s in summaries:
-            h, rws = read_csv_rows(s)
+            try:
+                h, rws, snapshot_sha256 = read_csv_rows_snapshot(s)
+            except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+                integrity_problems.append(
+                    f"run_summary.csv is unreadable or malformed: {s}: {exc}"
+                )
+                continue
+            if expected_summary_hashes:
+                expected_sha256 = expected_summary_hashes.get(str(Path(s).resolve()))
+                if snapshot_sha256 != expected_sha256:
+                    integrity_problems.append(
+                        f"run_summary.csv byte snapshot changed after Stage 2 index "
+                        f"validation: {s}"
+                    )
             for c in h:
                 if c not in header:
                     header.append(c)
@@ -456,7 +817,6 @@ def main():
         print(f"{entry}: {len(manifest_rows)} tiles expected, {len(tile_rows)} run_summary rows "
               f"from {len(summaries)} Stage 2 output folder(s)")
 
-        analysis_dirs = sorted({os.path.dirname(s) for s in summaries})
         stage2_failures, stage2_reasons, stage2_statuses = read_stage2_manifests(analysis_dirs)
         if stage2_failures:
             print(f"  Stage 2 reported {stage2_failures} per-image failure(s); "
@@ -464,8 +824,14 @@ def main():
 
         seam_dup, n_cells = 0, 0
         if args.seam_counts == "report":
-            by_section = {r["section_id"]: r for r in manifest_rows}
-            centroids, unmatched = collect_cell_centroids(analysis_dirs, by_section)
+            try:
+                by_section = {r["section_id"]: r for r in manifest_rows}
+                centroids, unmatched = collect_cell_centroids(analysis_dirs, by_section)
+            except (KeyError, OSError, UnicodeError, csv.Error, ValueError) as exc:
+                integrity_problems.append(
+                    f"cell-centroid seam diagnostics are unreadable or malformed: {exc}"
+                )
+                centroids, unmatched = [], 0
             if unmatched:
                 print(f"  note: {unmatched} __cells.csv file(s) could not be matched to a tile")
             seam_dup, n_cells = estimate_seam_duplicates(centroids, args.seam_merge_um)
@@ -476,26 +842,47 @@ def main():
 
         rec, problems = aggregate_slide(entry, manifest_rows, header, tile_rows,
                                         stage1_by_stem.get(entry), seam_dup, n_cells,
-                                        stage2_failures, stage2_reasons)
+                                        stage2_failures, stage2_reasons,
+                                        stage2_provenance, integrity_problems,
+                                        declared_markers_by_panel)
         for p in problems:
             print(f"  QC: {p}")
         all_problems.extend(f"{entry}: {p}" for p in problems)
         slide_rows.append(rec)
 
-    if not slide_rows:
-        sys.exit("ERROR: no slides aggregated.")
-
     blocking = [r for r in slide_rows if r["qc_status"] != "ok"]
-    out_path = os.path.join(outdir, "slide_level_summary.csv")
-    if blocking and not args.allow_incomplete:
-        write_csv(os.path.join(outdir, "slide_level_summary.REJECTED.csv"), slide_rows)
+    if all_problems or blocking or not slide_rows:
+        rejected_path = os.path.join(outdir, "slide_level_summary.REJECTED.csv")
+        if slide_rows:
+            dataset_notes = " | ".join(all_problems) or "declared dataset did not pass QC"
+            for row in slide_rows:
+                row["dataset_qc_status"] = "PROBLEM"
+                row["dataset_qc_notes"] = dataset_notes
+                if row["qc_status"] == "ok":
+                    row["qc_status"] = "PROBLEM"
+                    row["qc_notes"] = (
+                        "dataset-level rejection: " + dataset_notes
+                    )
+            write_csv(rejected_path, slide_rows)
+        stale = quarantine_if_exists(out_path)
         print("")
-        print(f"REFUSING to write slide_level_summary.csv: {len(blocking)} slide(s) failed QC.")
-        print("A slide with missing tiles still produces a plausible number, so this is fatal "
-              "by default. Inspect slide_level_summary.REJECTED.csv, fix Stage 2, and rerun. "
-              "Use --allow-incomplete only for diagnostics.")
+        print("REFUSING to write slide_level_summary.csv: the complete declared slide set "
+              "did not pass provenance and QC.")
+        if slide_rows:
+            print(f"Diagnostic rows only -> {rejected_path}")
+        if stale:
+            print(f"Quarantined stale analytical output -> {stale}")
+        print("A valid subset, a recursive discovery result, or an incomplete slide can all "
+              "produce plausible numbers; none is published under the analytical filename.")
         sys.exit(2)
 
+    for row in slide_rows:
+        row["dataset_qc_status"] = "ok"
+        row["dataset_qc_notes"] = ""
+    rejected_path = os.path.join(outdir, "slide_level_summary.REJECTED.csv")
+    stale_rejected = quarantine_if_exists(rejected_path)
+    if stale_rejected:
+        print(f"Quarantined stale rejected diagnostic -> {stale_rejected}")
     write_csv(out_path, slide_rows)
     print("")
     print(f"Wrote {len(slide_rows)} slide row(s) -> {out_path}")

@@ -14,8 +14,9 @@
     AND to their companion "<stem>.ome_RoiSet.zip" files, plus its own
     samplesheet.csv carved from the Stage 1 one.
 
-    Stage 3 (aggregate_tiles_to_slide.py) globs for every run_summary.csv under
-    the slide folder, so sharded output needs no further bookkeeping.
+    After every shard completes, build_stage2_run_index.py writes an explicit,
+    hashed stage2_run_index.json. Stage 3 consumes only those declared outputs;
+    it never guesses which retry or sibling analysis folder is authoritative.
 
     THIS SCRIPT DOES NOT SET THRESHOLDS. Pass calibrated values, or the engine
     falls back to per-tile adaptive Otsu, which on a mostly-background tile
@@ -39,19 +40,237 @@ param(
     [string]$Krt5Threshold = "",
     [string]$AgerThreshold = "",
     [string]$T1aThreshold = "",
-    [string]$JavaXmx = "8g"
+    [string]$JavaXmx = "8g",
+    [string]$PythonExe = "python",
+    [switch]$ReplaceExistingShards
 )
 
 $ErrorActionPreference = 'Stop'
 
-$TilesDir   = (Resolve-Path $TilesDir).Path
-$ScriptPath = (Resolve-Path $ScriptPath).Path
-if (-not (Test-Path $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
-$OutputRoot = (Resolve-Path $OutputRoot).Path
+function Get-NormalizedFullPath {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    return [System.IO.Path]::GetFullPath($LiteralPath)
+}
+
+function Test-IsDirectChildPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+    $candidateFull = Get-NormalizedFullPath $Candidate
+    $parentFull = Get-NormalizedFullPath $Parent
+    $candidateParent = [System.IO.Path]::GetDirectoryName($candidateFull)
+    return [string]::Equals(
+        $candidateParent,
+        $parentFull,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Assert-DirectChildPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Parent,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not (Test-IsDirectChildPath -Candidate $Candidate -Parent $Parent)) {
+        throw "$Label must resolve directly inside $Parent; got $Candidate"
+    }
+}
+
+function Test-IsWithinOrEqualPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+    $candidateFull = Get-NormalizedFullPath $Candidate
+    $rootFull = Get-NormalizedFullPath $Root
+    if ([string]::Equals($candidateFull, $rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    $trimChars = [char[]]@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $rootPrefix = $rootFull.TrimEnd($trimChars) + [System.IO.Path]::DirectorySeparatorChar
+    return $candidateFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-NoReparsePointInExistingChain {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $current = Get-NormalizedFullPath $Candidate
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label crosses a reparse-point path at $current. Use the physical path."
+            }
+        }
+        $parent = [System.IO.Directory]::GetParent($current)
+        if ($null -eq $parent) { break }
+        $parentPath = $parent.FullName
+        if ([string]::Equals(
+                $parentPath,
+                $current,
+                [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $current = $parentPath
+    }
+}
+
+function Assert-NoReparsePointTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    Assert-NoReparsePointInExistingChain -Candidate $Candidate -Label $Label
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Container)) { return }
+
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push((Get-NormalizedFullPath $Candidate))
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($child in @(Get-ChildItem -LiteralPath $directory -Force)) {
+            if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label contains a reparse point at $($child.FullName); recursive replacement is unsafe."
+            }
+            if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+        }
+    }
+}
+
+function Test-SafeBasename {
+    param([AllowEmptyString()][string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name -ne $Name.Trim()) { return $false }
+    if ($Name.EndsWith('.')) { return $false }
+    if ($Name -eq '.' -or $Name -eq '..') { return $false }
+    if ([System.IO.Path]::IsPathRooted($Name)) { return $false }
+    if ($Name.Contains('\') -or $Name.Contains('/')) { return $false }
+    if ($Name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $false }
+    return [System.IO.Path]::GetFileName($Name) -ceq $Name
+}
+
+$tilesCandidate = Get-NormalizedFullPath $TilesDir
+$scriptCandidate = Get-NormalizedFullPath $ScriptPath
+$outputCandidate = Get-NormalizedFullPath $OutputRoot
+Assert-NoReparsePointInExistingChain -Candidate $tilesCandidate -Label 'TilesDir'
+Assert-NoReparsePointInExistingChain -Candidate $scriptCandidate -Label 'Stage 2 script'
+Assert-NoReparsePointInExistingChain -Candidate $outputCandidate -Label 'OutputRoot'
+$TilesDir   = (Resolve-Path -LiteralPath $tilesCandidate).Path
+$ScriptPath = (Resolve-Path -LiteralPath $scriptCandidate).Path
+if (-not (Test-Path -LiteralPath $outputCandidate)) {
+    New-Item -ItemType Directory -Path $outputCandidate -Force | Out-Null
+}
+$OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
+Assert-NoReparsePointInExistingChain -Candidate $TilesDir -Label 'TilesDir'
+Assert-NoReparsePointInExistingChain -Candidate $ScriptPath -Label 'Stage 2 script'
+Assert-NoReparsePointInExistingChain -Candidate $OutputRoot -Label 'OutputRoot'
+
+if (Test-IsWithinOrEqualPath -Candidate $OutputRoot -Root $TilesDir) {
+    throw "OutputRoot must not be the Stage 1 TilesDir or a descendant of it."
+}
 
 $samplesheet = Join-Path $TilesDir 'samplesheet.csv'
-if (-not (Test-Path $samplesheet)) {
+if (-not (Test-Path -LiteralPath $samplesheet -PathType Leaf)) {
     throw "No samplesheet.csv in $TilesDir. Stage 1 writes it; do not run Stage 2 without it (mouse_id would become 'NA')."
+}
+$samplesheet = (Resolve-Path -LiteralPath $samplesheet).Path
+Assert-DirectChildPath -Candidate $samplesheet -Parent $TilesDir -Label 'Stage 1 samplesheet'
+
+# Fail before preserving/removing any prior output or launching Fiji if the
+# provenance builder cannot run or the Stage 1 authority is unavailable.
+$indexBuilder = Join-Path $PSScriptRoot 'build_stage2_run_index.py'
+$stage1Manifest = Join-Path (Split-Path $OutputRoot -Parent) 'stage1_manifest.json'
+if (-not (Test-Path -LiteralPath $stage1Manifest -PathType Leaf)) {
+    throw "Stage 1 manifest not found beside the slide folder: $stage1Manifest"
+}
+$stage1Manifest = (Resolve-Path -LiteralPath $stage1Manifest).Path
+if (-not (Test-Path -LiteralPath $indexBuilder -PathType Leaf)) {
+    throw "Stage 2 index builder not found: $indexBuilder"
+}
+$indexBuilder = (Resolve-Path -LiteralPath $indexBuilder).Path
+Assert-NoReparsePointInExistingChain -Candidate $stage1Manifest -Label 'Stage 1 manifest'
+Assert-NoReparsePointInExistingChain -Candidate $indexBuilder -Label 'Stage 2 index builder'
+
+$tileManifest = Join-Path $OutputRoot 'tile_manifest.csv'
+if (-not (Test-Path -LiteralPath $tileManifest -PathType Leaf)) {
+    throw "Stage 1 tile manifest not found in the slide folder: $tileManifest"
+}
+$tileManifest = (Resolve-Path -LiteralPath $tileManifest).Path
+Assert-DirectChildPath -Candidate $tileManifest -Parent $OutputRoot -Label 'Stage 1 tile manifest'
+Assert-NoReparsePointInExistingChain -Candidate $tileManifest -Label 'Stage 1 tile manifest'
+
+# Execute a content-addressed byte snapshot, not the mutable repository script.
+# Every shard and the index builder use this exact filename/byte payload.
+$scriptBytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $scriptHash = (($sha256.ComputeHash($scriptBytes) | ForEach-Object {
+        $_.ToString('x2')
+    }) -join '')
+} finally {
+    $sha256.Dispose()
+}
+$snapshotDir = Get-NormalizedFullPath (
+    Join-Path $OutputRoot ("stage2_engine_snapshot_" + $scriptHash)
+)
+Assert-DirectChildPath -Candidate $snapshotDir -Parent $OutputRoot -Label 'Engine snapshot directory'
+Assert-NoReparsePointInExistingChain -Candidate $snapshotDir -Label 'Engine snapshot directory'
+if (-not (Test-Path -LiteralPath $snapshotDir)) {
+    New-Item -ItemType Directory -Path $snapshotDir | Out-Null
+}
+Assert-NoReparsePointTree -Candidate $snapshotDir -Label 'Engine snapshot directory'
+$ExecutionScriptPath = Get-NormalizedFullPath (
+    Join-Path $snapshotDir ([System.IO.Path]::GetFileName($ScriptPath))
+)
+Assert-DirectChildPath -Candidate $ExecutionScriptPath -Parent $snapshotDir -Label 'Engine snapshot'
+if (Test-Path -LiteralPath $ExecutionScriptPath) {
+    if (-not (Test-Path -LiteralPath $ExecutionScriptPath -PathType Leaf)) {
+        throw "Engine snapshot path is not a regular file: $ExecutionScriptPath"
+    }
+    $existingSnapshotHash = (Get-FileHash -LiteralPath $ExecutionScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($existingSnapshotHash -ne $scriptHash) {
+        throw "Existing content-addressed engine snapshot has the wrong hash: $ExecutionScriptPath"
+    }
+} else {
+    $snapshotTemp = $ExecutionScriptPath + '.tmp.' + [Guid]::NewGuid().ToString('N')
+    Assert-DirectChildPath -Candidate $snapshotTemp -Parent $snapshotDir -Label 'Temporary engine snapshot'
+    try {
+        [System.IO.File]::WriteAllBytes($snapshotTemp, $scriptBytes)
+        Move-Item -LiteralPath $snapshotTemp -Destination $ExecutionScriptPath
+    } finally {
+        if (Test-Path -LiteralPath $snapshotTemp) {
+            Remove-Item -LiteralPath $snapshotTemp -Force
+        }
+    }
+}
+if ((Get-FileHash -LiteralPath $ExecutionScriptPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $scriptHash) {
+    throw "Engine snapshot verification failed: $ExecutionScriptPath"
+}
+$ExecutionScriptPath = (Resolve-Path -LiteralPath $ExecutionScriptPath).Path
+Assert-NoReparsePointInExistingChain -Candidate $ExecutionScriptPath -Label 'Engine snapshot'
+
+try {
+    $pythonCommand = Get-Command -Name $PythonExe -CommandType Application -ErrorAction Stop |
+                     Select-Object -First 1
+} catch {
+    throw "Python executable not found: $PythonExe"
+}
+if (-not $pythonCommand) { throw "Python executable not found: $PythonExe" }
+$PythonExe = $pythonCommand.Source
+Assert-NoReparsePointInExistingChain -Candidate $PythonExe -Label 'Python executable'
+try {
+    $pythonPreflightOutput = @(& $PythonExe $indexBuilder '--help' 2>&1)
+    $pythonPreflightExit = $LASTEXITCODE
+} catch {
+    throw "Stage 2 index builder could not start with $PythonExe : $($_.Exception.Message)"
+}
+if ($pythonPreflightExit -ne 0) {
+    throw ("Stage 2 index builder preflight failed (exit $pythonPreflightExit): " +
+           ($pythonPreflightOutput -join [Environment]::NewLine))
 }
 
 # Hard links only work within one volume.
@@ -66,10 +285,12 @@ if (-not $Krt5Threshold -or -not $AgerThreshold -or -not $T1aThreshold) {
                    "before any confirmatory run.")
 }
 
-$rows = Import-Csv $samplesheet
+$rows = @(Import-Csv -LiteralPath $samplesheet)
 if ($rows.Count -eq 0) { throw "samplesheet.csv has no rows." }
 Write-Host "Tiles in samplesheet : $($rows.Count)"
 
+$FijiDir = (Resolve-Path -LiteralPath $FijiDir).Path
+Assert-NoReparsePointInExistingChain -Candidate $FijiDir -Label 'FijiDir'
 $java = Get-ChildItem (Join-Path $FijiDir 'java') -Recurse -Filter java.exe -ErrorAction SilentlyContinue |
         Select-Object -First 1
 if (-not $java) { throw "No java.exe found under $FijiDir\java" }
@@ -80,40 +301,269 @@ if (-not $patcher) { throw "No ij1-patcher-*.jar found in $FijiDir\jars (require
 if ($Shards -lt 1) { $Shards = 1 }
 if ($Shards -gt $rows.Count) { $Shards = $rows.Count }
 
+# Resolve every output path and every samplesheet-declared input before any
+# prior shard is removed. Samplesheet filenames are data, not trusted paths:
+# each one must be a basename and each resulting hard-link endpoint must remain
+# a direct child of its declared source/destination directory.
+$indexPath = Get-NormalizedFullPath (Join-Path $OutputRoot 'stage2_run_index.json')
+Assert-DirectChildPath -Candidate $indexPath -Parent $OutputRoot -Label 'Stage 2 index'
+
+$shardLayouts = @()
+$outputPaths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+for ($i = 0; $i -lt $Shards; $i++) {
+    $tag = 'shard_{0:d2}' -f ($i + 1)
+    $shardRoot = Get-NormalizedFullPath (Join-Path $OutputRoot $tag)
+    $shardIn = Get-NormalizedFullPath (Join-Path $shardRoot 'tiles')
+    $shardOut = Get-NormalizedFullPath (Join-Path $OutputRoot "analysis_$tag")
+    $logPath = Get-NormalizedFullPath (Join-Path $OutputRoot ("stage2_" + $tag + ".log"))
+
+    Assert-DirectChildPath -Candidate $shardRoot -Parent $OutputRoot -Label "$tag root"
+    Assert-DirectChildPath -Candidate $shardIn -Parent $shardRoot -Label "$tag input"
+    Assert-DirectChildPath -Candidate $shardOut -Parent $OutputRoot -Label "$tag analysis output"
+    Assert-DirectChildPath -Candidate $logPath -Parent $OutputRoot -Label "$tag log"
+
+    foreach ($candidate in @($shardRoot, $shardIn, $shardOut, $logPath)) {
+        if (-not $outputPaths.Add($candidate)) {
+            throw "Output layout collision at $candidate"
+        }
+    }
+    foreach ($mutableRoot in @($shardRoot, $shardOut)) {
+        foreach ($protectedPath in @(
+            $TilesDir,
+            $samplesheet,
+            $ScriptPath,
+            $ExecutionScriptPath,
+            $indexBuilder,
+            $stage1Manifest,
+            $PythonExe,
+            $java.FullName,
+            $patcher.FullName
+        )) {
+            if (Test-IsWithinOrEqualPath -Candidate $protectedPath -Root $mutableRoot) {
+                throw "Unsafe output layout: replacing $mutableRoot would remove protected input $protectedPath"
+            }
+        }
+    }
+    $shardLayouts += [pscustomobject]@{
+        Tag = $tag
+        Root = $shardRoot
+        In = $shardIn
+        Out = $shardOut
+        Log = $logPath
+    }
+}
+
+$plannedRows = @()
+$seenFilenames = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+$seenDestinations = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+for ($k = 0; $k -lt $rows.Count; $k++) {
+    $row = $rows[$k]
+    $filename = [string]$row.filename
+    $csvRow = $k + 2
+    if (-not (Test-SafeBasename $filename)) {
+        throw "Unsafe filename in samplesheet.csv row ${csvRow}: '$filename'. Expected a plain basename with no root, traversal, or separators."
+    }
+    if (-not $seenFilenames.Add($filename)) {
+        throw "Duplicate filename in samplesheet.csv row ${csvRow}: '$filename'"
+    }
+
+    $tifCandidate = Join-Path $TilesDir $filename
+    if (-not (Test-Path -LiteralPath $tifCandidate -PathType Leaf)) {
+        throw "Tile listed in samplesheet.csv is missing: $tifCandidate"
+    }
+    $tifItem = Get-Item -LiteralPath $tifCandidate
+    if (($tifItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Tile in samplesheet.csv row $csvRow is a reparse point; hard-link sources must be regular files inside TilesDir."
+    }
+    $tif = (Resolve-Path -LiteralPath $tifCandidate).Path
+    Assert-DirectChildPath -Candidate $tif -Parent $TilesDir -Label "Tile in samplesheet.csv row $csvRow"
+
+    # The engine strips only the FINAL extension: foo.ome.tif -> foo.ome_RoiSet.zip
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($filename)
+    $roiFilename = $stem + '_RoiSet.zip'
+    if (-not (Test-SafeBasename $roiFilename)) {
+        throw "Unsafe companion ROI basename derived from samplesheet.csv row ${csvRow}: '$roiFilename'"
+    }
+    $roiCandidate = Join-Path $TilesDir $roiFilename
+    if (-not (Test-Path -LiteralPath $roiCandidate -PathType Leaf)) {
+        throw ("Missing companion ROI for ${filename}: expected $roiCandidate . Without it the engine " +
+               "falls back to auto tissue detection or to the whole halo-inclusive frame, " +
+               "double-counting every seam.")
+    }
+    $roiItem = Get-Item -LiteralPath $roiCandidate
+    if (($roiItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Companion ROI for samplesheet.csv row $csvRow is a reparse point; hard-link sources must be regular files inside TilesDir."
+    }
+    $roi = (Resolve-Path -LiteralPath $roiCandidate).Path
+    Assert-DirectChildPath -Candidate $roi -Parent $TilesDir -Label "Companion ROI for samplesheet.csv row $csvRow"
+
+    $layout = $shardLayouts[$k % $Shards]
+    $tifDestination = Get-NormalizedFullPath (Join-Path $layout.In $filename)
+    $roiDestination = Get-NormalizedFullPath (Join-Path $layout.In $roiFilename)
+    Assert-DirectChildPath -Candidate $tifDestination -Parent $layout.In -Label "Tile hard-link destination for row $csvRow"
+    Assert-DirectChildPath -Candidate $roiDestination -Parent $layout.In -Label "ROI hard-link destination for row $csvRow"
+    foreach ($destination in @($tifDestination, $roiDestination)) {
+        if (-not $seenDestinations.Add($destination)) {
+            throw "Hard-link destination collision from samplesheet.csv row ${csvRow}: $destination"
+        }
+    }
+    $plannedRows += [pscustomobject]@{
+        ShardIndex = ($k % $Shards)
+        Row = $row
+        Filename = $filename
+        TifSource = $tif
+        RoiSource = $roi
+        TifDestination = $tifDestination
+        RoiDestination = $roiDestination
+    }
+}
+
+# Refuse an accidental overwrite before creating any shard. A retry must be an
+# explicit operator decision because an abandoned sibling output is precisely
+# what the Stage 2 index is designed to keep out of analytical aggregation.
+$existingShardPaths = @()
+foreach ($layout in $shardLayouts) {
+    foreach ($candidate in @($layout.Root, $layout.Out, $layout.Log)) {
+        if (Test-Path -LiteralPath $candidate) { $existingShardPaths += $candidate }
+    }
+    foreach ($recursiveTarget in @($layout.Root, $layout.Out)) {
+        if (Test-Path -LiteralPath $recursiveTarget) {
+            $targetItem = Get-Item -LiteralPath $recursiveTarget
+            if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to recursively replace reparse-point output path: $recursiveTarget"
+            }
+        }
+    }
+    if ((Test-Path -LiteralPath $layout.Log) -and
+        (Get-Item -LiteralPath $layout.Log).PSIsContainer) {
+        throw "Unsafe output layout: expected a log file but found a directory at $($layout.Log)"
+    }
+}
+if ($existingShardPaths.Count -gt 0 -and -not $ReplaceExistingShards) {
+    throw ("Existing shard paths would be replaced: " + ($existingShardPaths -join ', ') +
+           ". Choose a new OutputRoot or pass -ReplaceExistingShards explicitly.")
+}
+
+if (Test-Path -LiteralPath $indexPath) {
+    if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) {
+        throw "Unsafe output layout: expected the Stage 2 index to be a file at $indexPath"
+    }
+    if (-not $ReplaceExistingShards) {
+        throw "A Stage 2 index already exists: $indexPath. Choose a new OutputRoot or pass -ReplaceExistingShards."
+    }
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    $staleIndex = Join-Path $OutputRoot ("stage2_run_index.STALE_" + $stamp + ".json")
+    Assert-DirectChildPath -Candidate $staleIndex -Parent $OutputRoot -Label 'Preserved Stage 2 index'
+    if (Test-Path -LiteralPath $staleIndex) {
+        throw "Cannot preserve the prior Stage 2 index because the stale destination already exists: $staleIndex"
+    }
+    Move-Item -LiteralPath $indexPath -Destination $staleIndex
+    Write-Host "  preserved prior index -> $staleIndex"
+}
+
 # ---- build shards -------------------------------------------------------
 $shardDirs = @()
 for ($i = 0; $i -lt $Shards; $i++) {
-    $tag       = 'shard_{0:d2}' -f ($i + 1)
-    $shardIn   = Join-Path $OutputRoot "$tag\tiles"
-    $shardOut  = Join-Path $OutputRoot "analysis_$tag"
-    if (Test-Path $shardIn)  { Remove-Item $shardIn  -Recurse -Force }
-    if (Test-Path $shardOut) { Remove-Item $shardOut -Recurse -Force }
-    New-Item -ItemType Directory -Path $shardIn -Force | Out-Null
-
-    $mine = @()
-    for ($k = $i; $k -lt $rows.Count; $k += $Shards) { $mine += $rows[$k] }
-
-    foreach ($row in $mine) {
-        $tif = Join-Path $TilesDir $row.filename
-        if (-not (Test-Path $tif)) { throw "Tile listed in samplesheet.csv is missing: $tif" }
-        New-Item -ItemType HardLink -Path (Join-Path $shardIn $row.filename) -Target $tif | Out-Null
-
-        # The engine strips only the FINAL extension: foo.ome.tif -> foo.ome_RoiSet.zip
-        $stem = [System.IO.Path]::GetFileNameWithoutExtension($row.filename)
-        $roi  = Join-Path $TilesDir ($stem + '_RoiSet.zip')
-        if (-not (Test-Path $roi)) {
-            throw ("Missing companion ROI for $($row.filename): expected $roi . Without it the engine " +
-                   "falls back to auto tissue detection or to the whole halo-inclusive frame, " +
-                   "double-counting every seam.")
-        }
-        New-Item -ItemType HardLink -Path (Join-Path $shardIn ($stem + '_RoiSet.zip')) -Target $roi | Out-Null
+    $layout = $shardLayouts[$i]
+    $tag = $layout.Tag
+    $shardRoot = $layout.Root
+    $shardIn = $layout.In
+    $shardOut = $layout.Out
+    $logPath = $layout.Log
+    if (Test-Path -LiteralPath $shardRoot) {
+        Assert-NoReparsePointTree -Candidate $shardRoot -Label "$tag shard input tree"
+        Remove-Item -LiteralPath $shardRoot -Recurse -Force
     }
-    $mine | Export-Csv (Join-Path $shardIn 'samplesheet.csv') -NoTypeInformation -Encoding UTF8
+    if (Test-Path -LiteralPath $shardOut) {
+        Assert-NoReparsePointTree -Candidate $shardOut -Label "$tag analysis output tree"
+        Remove-Item -LiteralPath $shardOut -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $logPath) { Remove-Item -LiteralPath $logPath -Force }
+    New-Item -ItemType Directory -Path $shardIn -Force | Out-Null
+    $resolvedShardIn = (Resolve-Path -LiteralPath $shardIn).Path
+    if (-not [string]::Equals(
+            $resolvedShardIn,
+            $shardIn,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Shard input directory resolved somewhere unexpected: $shardIn -> $resolvedShardIn"
+    }
+
+    $minePlans = @($plannedRows | Where-Object { $_.ShardIndex -eq $i })
+    foreach ($plan in $minePlans) {
+        # Re-resolve immediately before link creation to preserve the containment
+        # guarantee even if the filesystem changed after the initial preflight.
+        if (-not (Test-Path -LiteralPath $plan.TifSource -PathType Leaf)) {
+            throw "Preflighted tile disappeared before hard-link creation: $($plan.TifSource)"
+        }
+        if (-not (Test-Path -LiteralPath $plan.RoiSource -PathType Leaf)) {
+            throw "Preflighted ROI disappeared before hard-link creation: $($plan.RoiSource)"
+        }
+        foreach ($sourcePath in @($plan.TifSource, $plan.RoiSource)) {
+            $sourceItem = Get-Item -LiteralPath $sourcePath
+            if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Preflighted hard-link source became a reparse point: $sourcePath"
+            }
+        }
+        $tifSource = (Resolve-Path -LiteralPath $plan.TifSource).Path
+        $roiSource = (Resolve-Path -LiteralPath $plan.RoiSource).Path
+        Assert-DirectChildPath -Candidate $tifSource -Parent $TilesDir -Label 'Tile hard-link source'
+        Assert-DirectChildPath -Candidate $roiSource -Parent $TilesDir -Label 'ROI hard-link source'
+        Assert-DirectChildPath -Candidate $plan.TifDestination -Parent $resolvedShardIn -Label 'Tile hard-link destination'
+        Assert-DirectChildPath -Candidate $plan.RoiDestination -Parent $resolvedShardIn -Label 'ROI hard-link destination'
+
+        New-Item -ItemType HardLink -Path $plan.TifDestination -Target $tifSource | Out-Null
+        New-Item -ItemType HardLink -Path $plan.RoiDestination -Target $roiSource | Out-Null
+    }
+    $mine = @($minePlans | ForEach-Object { $_.Row })
+    $shardSamplesheet = Get-NormalizedFullPath (Join-Path $resolvedShardIn 'samplesheet.csv')
+    Assert-DirectChildPath -Candidate $shardSamplesheet -Parent $resolvedShardIn -Label 'Shard samplesheet'
+    $mine | Export-Csv -LiteralPath $shardSamplesheet -NoTypeInformation -Encoding UTF8
     Write-Host ("  {0}: {1} tiles -> {2}" -f $tag, $mine.Count, $shardOut)
-    $shardDirs += [pscustomobject]@{ Tag = $tag; In = $shardIn; Out = $shardOut; N = $mine.Count }
+    $shardDirs += [pscustomobject]@{
+        Tag = $tag
+        In = $resolvedShardIn
+        Out = $shardOut
+        Log = $logPath
+        N = $mine.Count
+    }
 }
 
 # ---- launch -------------------------------------------------------------
+$lockedInputs = [System.Collections.Generic.List[System.IO.FileStream]]::new()
+try {
+    # Deny writes/deletes while Fiji and the index builder read the declared
+    # inputs. Hard links refer to the same file records, so locking the source
+    # paths also freezes every shard's tile and ROI bytes.
+    $lockPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($pathToLock in @(
+        $ExecutionScriptPath,
+        $stage1Manifest,
+        $tileManifest
+    )) { [void]$lockPaths.Add($pathToLock) }
+    foreach ($plan in $plannedRows) {
+        [void]$lockPaths.Add($plan.TifSource)
+        [void]$lockPaths.Add($plan.RoiSource)
+    }
+    foreach ($shard in $shardDirs) {
+        [void]$lockPaths.Add((Join-Path $shard.In 'samplesheet.csv'))
+    }
+    foreach ($pathToLock in $lockPaths) {
+        $lockedInputs.Add([System.IO.File]::Open(
+            $pathToLock,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        ))
+    }
+
 $cp = (Join-Path $FijiDir 'jars\*') + ';' + (Join-Path $FijiDir 'plugins\*')
 $procs = @()
 foreach ($s in $shardDirs) {
@@ -137,7 +587,7 @@ foreach ($s in $shardDirs) {
         ("-Dplugins.dir=" + $FijiDir),
         ("-Xmx" + $JavaXmx),
         '-cp', $cp,
-        'net.imagej.Main', '--headless', '--run', $ScriptPath)) {
+        'net.imagej.Main', '--headless', '--run', $ExecutionScriptPath)) {
         $psi.ArgumentList.Add($a)
     }
     foreach ($k in $envPairs.Keys) { $psi.EnvironmentVariables[$k] = $envPairs[$k] }
@@ -145,14 +595,31 @@ foreach ($s in $shardDirs) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
 
-    $logPath = Join-Path $OutputRoot ("stage2_" + $s.Tag + ".log")
+    $logPath = $s.Log
     $p = [System.Diagnostics.Process]::Start($psi)
     # Drain both pipes asynchronously or a full buffer deadlocks the child.
-    $p.add_OutputDataReceived({ param($sender, $e) if ($e.Data) { Add-Content -Path $logPath -Value $e.Data } })
-    $p.add_ErrorDataReceived( { param($sender, $e) if ($e.Data) { Add-Content -Path $logPath -Value $e.Data } })
+    # Freeze the per-shard log path into each callback; a loop-variable closure
+    # would otherwise let concurrent shards write into whichever path was last.
+    $callbackLogPath = $logPath
+    $outputCallback = {
+        param($sender, $e)
+        if ($e.Data) { Add-Content -LiteralPath $callbackLogPath -Value $e.Data }
+    }.GetNewClosure()
+    $errorCallback = {
+        param($sender, $e)
+        if ($e.Data) { Add-Content -LiteralPath $callbackLogPath -Value $e.Data }
+    }.GetNewClosure()
+    $p.add_OutputDataReceived($outputCallback)
+    $p.add_ErrorDataReceived($errorCallback)
     $p.BeginOutputReadLine(); $p.BeginErrorReadLine()
     Write-Host ("  launched {0} (pid {1}) -> {2}" -f $s.Tag, $p.Id, $logPath)
-    $procs += [pscustomobject]@{ Shard = $s; Proc = $p; Log = $logPath }
+    $procs += [pscustomobject]@{
+        Shard = $s
+        Proc = $p
+        Log = $logPath
+        OutputCallback = $outputCallback
+        ErrorCallback = $errorCallback
+    }
 }
 
 Write-Host ""
@@ -163,26 +630,68 @@ Write-Host ""
 $bad = 0
 foreach ($x in $procs) {
     $summary = Join-Path $x.Shard.Out 'run_summary.csv'
-    $n = 0
-    if (Test-Path $summary) { $n = [Math]::Max(0, (Import-Csv $summary).Count) }
+    $nRows = 0
+    $nSections = 0
+    if (Test-Path -LiteralPath $summary) {
+        $summaryRows = @(Import-Csv -LiteralPath $summary)
+        $nRows = $summaryRows.Count
+        $nSections = @($summaryRows | ForEach-Object { $_.section_id } | Sort-Object -Unique).Count
+    }
     # exit code 1 means "at least one image failed", NOT "no results" -- outputs
     # are written before the terminal failRun. Parse run_manifest.json instead.
     $status = 'unknown'
     $manifest = Join-Path $x.Shard.Out 'run_manifest.json'
-    if (Test-Path $manifest) {
-        try { $status = (Get-Content $manifest -Raw | ConvertFrom-Json).status } catch { $status = 'unparseable' }
+    if (Test-Path -LiteralPath $manifest) {
+        try { $status = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).status } catch { $status = 'unparseable' }
     }
-    Write-Host ("  {0}: exit={1} status={2} rows={3}/{4}  log={5}" -f `
-        $x.Shard.Tag, $x.Proc.ExitCode, $status, $n, $x.Shard.N, $x.Log)
-    if ($n -ne $x.Shard.N) { $bad++ }
+    Write-Host ("  {0}: exit={1} status={2} sections={3}/{4} region_rows={5}  log={6}" -f `
+        $x.Shard.Tag, $x.Proc.ExitCode, $status, $nSections, $x.Shard.N, $nRows, $x.Log)
+    if ($x.Proc.ExitCode -ne 0 -or $status -ne 'complete' -or $nSections -ne $x.Shard.N) { $bad++ }
 }
 
 Write-Host ""
 if ($bad -gt 0) {
-    Write-Warning ("$bad shard(s) produced fewer rows than tiles. Stage 3 will refuse to emit a " +
-                   "slide summary until this is resolved -- a slide with missing tiles still " +
-                   "produces a plausible number.")
+    throw ("$bad shard(s) failed exit/status/unique-section reconciliation. No Stage 2 index " +
+           "was published; a partial run must not enter Stage 3.")
 } else {
-    Write-Host "All shards produced one row per tile."
+    Write-Host "All shards covered every assigned tile (partitioned tiles may emit multiple region rows)."
 }
-Write-Host "Next: python aggregate_tiles_to_slide.py --slide-root <stage1 output root>"
+
+if ((Get-FileHash -LiteralPath $ExecutionScriptPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $scriptHash) {
+    throw "The content-addressed Stage 2 engine snapshot changed during execution. No index was published."
+}
+
+$indexArgs = @(
+    $indexBuilder,
+    '--slide-dir', $OutputRoot,
+    '--stage1-manifest', $stage1Manifest,
+    '--stage2-script', $ExecutionScriptPath,
+    '--output', $indexPath
+)
+foreach ($x in $procs) {
+    $indexArgs += @(
+        '--run',
+        $x.Shard.Out,
+        (Join-Path $x.Shard.In 'samplesheet.csv'),
+        ([string]$x.Proc.ExitCode)
+    )
+}
+& $PythonExe @indexArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Stage 2 outputs failed index validation; no authoritative index was published."
+}
+$indexedScriptHash = (
+    (Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json).stage2_script.sha256
+)
+if ($indexedScriptHash -ne $scriptHash) {
+    $invalidIndex = Join-Path $OutputRoot (
+        "stage2_run_index.INVALID_SCRIPT_" + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + ".json"
+    )
+    Move-Item -LiteralPath $indexPath -Destination $invalidIndex
+    throw "Published index did not bind the executed engine snapshot; quarantined at $invalidIndex"
+}
+} finally {
+    foreach ($lockedInput in $lockedInputs) { $lockedInput.Dispose() }
+}
+Write-Host "Published explicit Stage 2 index -> $indexPath"
+Write-Host "Next: python aggregate_tiles_to_slide.py --slide-root $(Split-Path $OutputRoot -Parent)"
