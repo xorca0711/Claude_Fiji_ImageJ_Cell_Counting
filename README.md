@@ -57,8 +57,11 @@ the imaging endpoint; no survival analysis was performed.
 | M4-2 | het | uninfected | **0.000 %** | 0 |
 | M6 | hom | uninfected | **0.003 %** | ~0 |
 
-T1α moves in the expected direction (AT1 loss after injury). **This describes
-four animals. It is not a group comparison** — see result 6.
+An exploratory, uncalibrated T1α trend (adaptive per-image threshold with no
+negative-control anchor; labelled `adaptive_otsu_exploratory` in the claims
+table) is directionally consistent with AT1 loss after injury. It is an
+observation, not a measured result. **The table describes four animals. It is
+not a group comparison**; see result 6.
 
 **3 · A silent segmentation defect, found and quantified.** A missing `black`
 token in an ImageJ Binary Options macro string set `Prefs.blackBackground = false`
@@ -109,6 +112,14 @@ The first demonstrates the segmentation defect and its fix. The second is an
 execution-based backward-compatibility proof — 85 checks comparing what a *real
 child process* receives, including the self-critical one that detects the
 embedded engine has drifted from the version it claims equivalence to.
+
+The second of these, together with the full test suite, the configuration
+contracts, and the launcher's embedded self-tests, also runs in CI on every
+push; the segmentation-defect demo needs a local Fiji and stays local. Each CI
+run uploads a `validation-evidence-<commit>` artifact holding the command
+transcripts and a machine-readable receipt;
+[`docs/VALIDATION_EVIDENCE.md`](docs/VALIDATION_EVIDENCE.md) describes what
+that artifact contains and what it does and does not establish.
 
 ---
 

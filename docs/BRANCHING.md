@@ -1,7 +1,7 @@
 # Branch roles
 
 > **Status: CURRENT.** Branch topology verified against `git branch -a` and
-> `git tag` on 2026-08-09. The "Completed Z-stack merge gate" section at the
+> `git tag` on 2026-08-26. The "Completed Z-stack merge gate" section at the
 > bottom is a **historical record** of a gate that was passed, not a live
 > checklist.
 
@@ -11,10 +11,19 @@ keep working, but new remotes should use the new name.
 
 ## Active branches
 
-- `main`: **the only development line.** Carries the morphology-first Fiji
-  engine, the QuPath whole-slide front end, the damaged-area partition, the
-  relational endpoints module, the control-derived calibration, and the
-  four-route launcher. Start all new work here.
+- `main`: **the default and integration line.** Carries the morphology-first
+  Fiji engine, the QuPath whole-slide front end, the damaged-area partition,
+  the relational endpoints module, the control-derived calibration, the
+  four-route launcher, and (since PR #22 through PR #24, merged 2026-08-25
+  and 2026-08-26) the audit-driven provenance framework. Work reaches `main`
+  by pull request.
+- `codex/audit-authority-provenance`: the current working branch for the
+  audit-authority and provenance work and the v1.9.7 release preparation.
+  New work lands here first.
+
+Fully merged history labels with zero unique commits:
+`codex/fix-run-failures-v1.9.5` (tip `d692fdd`) and the local-only
+`work/local-analysis-in-progress-20260821` (tip `45ecea6`).
 
 ## Tags
 
@@ -22,18 +31,24 @@ keep working, but new remotes should use the new name.
 |---|---|---|
 | `v2.0.0` | `dfa3cfa` | "Preserve the superseded QuPath engines and consolidate branch roles" |
 | `v1.8.0` | `f16e8b4` | the four-route launcher |
-| `v1.9.0` | `22afada` | current published launcher release |
-| *(none)* | `35d27b8` | repository documentation/architecture work after the launcher release |
+| `v1.9.0` | `22afada` | published launcher release (2026-08-08) |
+| `v1.9.1` | `febcf94` | latest published launcher release, the input-scope reachability repair (2026-08-09) |
 
 Two tag series coexist because `v2.0.0` versions the **repository** and `v1.8.0`
 versions the **launcher**. That is confusing, reads as a rollback in `git tag`
 output, and puts the *lower* number on the *later* commit.
 
-The launcher is now correctly tagged and published as **v1.9.0** at `22afada`.
+The launcher was tagged and published as **v1.9.0** at `22afada` on 2026-08-08.
+**v1.9.1** (`febcf94`, the input-scope reachability repair) followed on
+2026-08-09 as the latest published launcher release, with its own binary and
+hash sidecar; its commit also archives the v1.9.0 binary under
+`legacy/launchers`. The launcher source has since advanced to v1.9.7, which is
+not yet tagged or released.
 The remaining problem is naming, not missing release state: repository tag
-`v2.0.0` predates launcher tags `v1.8.0` and `v1.9.0`. Future tags should either
-use one repository-wide version or explicit namespaces such as `repo-v*` and
-`launcher-v*`. Existing tags are historical records and must not be rewritten.
+`v2.0.0` predates the launcher tags `v1.8.0` through `v1.9.1`. Future tags
+should either use one repository-wide version or explicit namespaces such as
+`repo-v*` and `launcher-v*`. Existing tags are historical records and must not
+be rewritten.
 
 Everything else was consolidated onto `main` on 2026-08-07 (PR #11).
 
@@ -89,7 +104,8 @@ The following checks were completed before promoting
 `codex/z-stack-analysis` to `main`. They are a record of a gate that was passed
 during the ALI organoid pilot; they are **not** a live checklist, and the
 launcher version history below stops at v1.7.2 because that is where the gate
-stopped. Current launcher state is in [`PROJECT_STATE.md`](PROJECT_STATE.md) §4.
+stopped. Current launcher state is in
+[`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md).
 
 1. Representative 20× stacks for `ALI1`, `ALI2`, and `ALI3` completed.
 2. Each validation manifest completed without image failures.

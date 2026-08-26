@@ -46,7 +46,7 @@ its brightfield measurements belong in a separate QuPath module.
 
 | # | read | why |
 |---|---|---|
-| 1 | [`PROJECT_STATE.md`](PROJECT_STATE.md) §0–§3 | what exists, what is calibrated, what the numbers are, and the one-token bug that nearly ate them |
+| 1 | [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md) and [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md) | current claim/route authority and the latest engineering checkpoint; [`PROJECT_STATE.md`](PROJECT_STATE.md) §0–§3 remains the historical narrative of what was calibrated and the one-token bug that nearly ate the numbers |
 | 2 | [`NEGATIVE_RESULTS.md`](NEGATIVE_RESULTS.md) | two markers tested and rejected, with the measurement that killed each |
 | 3 | [`QUPATH_FIJI_INTEGRATION.md`](QUPATH_FIJI_INTEGRATION.md) | why two tools, and why the handoff is files |
 | 4 | [`ECTOPIC_POD_ENDPOINT.md`](ECTOPIC_POD_ENDPOINT.md) banner + §4c | how an operating point was locked from controls only — and why the endpoint it served was still wrong |
@@ -60,6 +60,7 @@ its brightfield measurements belong in a separate QuPath module.
 | document | status | what it is |
 |---|---|---|
 | [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md) | **GENERATED CURRENT STATUS** | deterministic rendering of the machine-readable claim and route authority |
+| [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md) | **CURRENT ENGINEERING CHECKPOINT** | completed audit-driven engineering, final verification results, and the remaining external gates |
 | [`AUDIT_REMEDIATION_ROADMAP.md`](AUDIT_REMEDIATION_ROADMAP.md) | **PROPOSED** | three-track architecture, problem-to-remedy map, and measurable acceptance gates |
 | [`RUN_ROOT_INVENTORY_2026-08-25.md`](RUN_ROOT_INVENTORY_2026-08-25.md) | **READ-ONLY STRUCTURAL AUDIT** | sanitized inventory of relocated confocal, WSI, and H&E run artifacts and the authority rules derived from them |
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | **NARRATIVE HANDOFF** | historical locations, provisional operating point, corrected endpoint, open debt, and decisions; subordinate to the generated authority |
@@ -94,6 +95,7 @@ engine *decides*, not what this study *found*.
 | document | status | what it is |
 |---|---|---|
 | [`BRANCHING.md`](BRANCHING.md) | **CURRENT** | branch roles, what was retired and why, the completed Z-stack merge gate |
+| [`VALIDATION_EVIDENCE.md`](VALIDATION_EVIDENCE.md) | **CURRENT** | what the per-commit CI evidence artifact contains, how to download it, and what it does and does not establish |
 | [`PRIVACY_AND_DATA_BOUNDARY.md`](PRIVACY_AND_DATA_BOUNDARY.md) | **CURRENT** | what may be public, what must remain local, and the pre-publication privacy checks |
 
 ### Entry points outside `docs/`

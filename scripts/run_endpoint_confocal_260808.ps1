@@ -16,7 +16,7 @@ param(
 # (the measured result). Masks land in <run>\tissue_masks.
 
 $ErrorActionPreference = "Stop"
-$repo = "X:\GitHub\IFQuant-Lung"
+$repo = Split-Path -Parent $PSScriptRoot
 $data = [System.IO.Path]::GetFullPath($DataRoot)
 $out  = [System.IO.Path]::GetFullPath($RunRoot)
 $fj   = "X:\Fiji"

@@ -6,7 +6,9 @@
 >
 > [`README.md`](README.md) is the entry point and states what is validated.
 > This document states **how the algorithm works**.
-> Last checked: 2026-08-09.
+> Last checked in full: 2026-08-09. The T1α interpretation note was corrected
+> on 2026-08-26; launcher and provenance work newer than the full check is
+> recorded in [`docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md`](docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md).
 
 Final marker calls are determined by **role-appropriate spatial morphology**.
 Mean intensity is retained for audit but does not authorize a positive or
@@ -153,9 +155,10 @@ flowchart TB
     style ANS fill:#5c1b1b,color:#fff
 ```
 
-**What the data does support:** the infected/uninfected contrast is near-binary
-(≈12–14 % against ≈0 %) and consistent in direction with T1α loss, so the
-*measurement* is behaving as expected. **What it does not support:** any claim
+**What the data does support:** the infected/uninfected KRT5 contrast is
+near-binary (≈12–14 % against ≈0 %), so the *measurement* is behaving as
+expected. An exploratory, uncalibrated T1α trend is directionally consistent
+but is not a measured result (no negative-control anchor exists for T1α). **What it does not support:** any claim
 about the IFN-γ genotype, which is the study question. That needs replicate
 animals per cell — the reference used **n = 15 per group**.
 

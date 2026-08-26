@@ -12,8 +12,11 @@
 > new four-mouse/eight-section H&E cohort, and the
 > G-SURF research scheme.
 > The human-facing entry points are [`../README.md`](../README.md) and
-> [`../WORKFLOW.md`](../WORKFLOW.md); [`PROJECT_STATE.md`](PROJECT_STATE.md) is
-> the living handoff, and [`../DEVELOPMENT.md`](../DEVELOPMENT.md) is the
+> [`../WORKFLOW.md`](../WORKFLOW.md); [`PROJECT_STATE.md`](PROJECT_STATE.md) was
+> the living handoff at snapshot time (current state lives in
+> [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md)
+> and [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md)), and
+> [`../DEVELOPMENT.md`](../DEVELOPMENT.md) is the
 > authorship and scientific-control statement.
 > This file adds what those omit: environment traps,
 > failure modes, and process lessons that are expensive to rediscover.
@@ -262,7 +265,7 @@ for appearance.
 | `config/endpoints/ectopic_pod_over_damaged.json` | retracted; kept as the record |
 | `panels/MergePanels.java` | merge panels (photograph) |
 | `panels/qc/RenderPanels.java` | QC overlays (analysis result) |
-| `launcher/` | v1.9.3 GUI build with calibrated internal visual-merge scale bars, 4 routes; H&E remains disabled; `run_legacy_equivalence.ps1` |
+| `launcher/` | v1.9.3 at snapshot time; now v1.9.7 four-route GUI with calibrated visual-merge scale bars, Route 2 staged execution, and an isolated H&E review-only screen (biological execution stays disabled); `run_legacy_equivalence.ps1` (85 checks) |
 | `config/brightfield/` | proposed H&E decision hierarchy and endpoint tiers |
 | `config/studies/g_surf_he_20260812.json` | verified 4-mouse/8-section H&E identity contract |
 | `docs/HE_BRIGHTFIELD_DECISION_HIERARCHY.md` | H&E scope, QC gates, endpoints, outputs and validation ladder |

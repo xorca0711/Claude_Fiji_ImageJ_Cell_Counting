@@ -82,6 +82,11 @@ validation/out/
 !validation/*.ps1
 !validation/README.md
 
+# Repository-validation receipts and command transcripts. CI uploads these as
+# per-commit GitHub Actions artifacts; local copies are regenerable and may
+# contain runner-specific absolute paths, so they do not belong in Git.
+/validation-results/
+
 # Derived whole-slide review snapshots. These are local inspection aids generated
 # from microscopy data; keep them with run outputs rather than at repository root.
 /wsi_slide*_review.png
