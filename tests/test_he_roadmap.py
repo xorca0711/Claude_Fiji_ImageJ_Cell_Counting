@@ -31,7 +31,11 @@ class HeRoadmapTests(unittest.TestCase):
                     "COHORT_REVIEWED_R1",
                     "DEVELOPMENT_CONTEXT_ONLY",
                     "RUBRIC_DEFINED_REVIEW_REQUIRED",
+                    "LOCKED_RUBRIC_AND_AGGREGATION_GATE_READY_REVIEW_REQUIRED",
+                    "ORDINAL_ENGINEERING_READY_QUANTITATIVE_ENDPOINTS_UNAVAILABLE",
+                    "ORDINAL_ENGINEERING_READY_REVIEW_REQUIRED",
                     "R1_PROVENANCE_VERIFIED",
+                    "R1_PROVENANCE_VERIFIED_H7_H8_AUDIT_READY",
                     "UNAVAILABLE",
                 },
             )

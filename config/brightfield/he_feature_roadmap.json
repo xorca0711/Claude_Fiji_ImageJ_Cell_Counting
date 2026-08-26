@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0.0",
   "module": "brightfield_he",
-  "status": "R1_APPROVED_R2_DEVELOPMENT",
-  "current_capability": "R1_IMAGE_QC_APPROVED_H4_H7_DEVELOPMENT",
+  "status": "R1_APPROVED_H7_H8_ENGINEERING_READY_REVIEW_REQUIRED",
+  "current_capability": "R1_IMAGE_QC_APPROVED_H4_CONTEXT_H7_H8_ENGINEERING_READY",
   "launcher_route_enabled": false,
   "biological_unit": "mouse",
   "release_levels": [
@@ -70,25 +70,25 @@
       "remaining_blocker": "No topology engine or authorized lesion object exists."
     },
     {
-      "id": "HE-F09", "name": "Blinded review and ordinal pathology rubric", "stages": ["H7"], "priority": "P0", "status": "RUBRIC_DEFINED_REVIEW_REQUIRED", "depends_on": ["HE-F03", "HE-F05", "HE-F08"],
+      "id": "HE-F09", "name": "Blinded review and ordinal pathology rubric", "stages": ["H7"], "priority": "P0", "status": "LOCKED_RUBRIC_AND_AGGREGATION_GATE_READY_REVIEW_REQUIRED", "depends_on": ["HE-F03", "HE-F05", "HE-F08"],
       "implementation": "Create a label-blinded review queue covering every mouse and both sections. Support accept, edit, reject and Indeterminate for masks, plus locked 0-4 rubrics for alveolitis/interstitial inflammation, bronchiolitis/epithelial injury, peribronchial cuffing, perivascular cuffing and consolidation. Preserve original and edited geometry.",
-      "outputs": ["he_review_queue.csv", "he_review_decisions.csv", "reviewed_masks", "ordinal_scores.csv", "review_audit.json"],
+      "outputs": ["H7_SECTION_PATHOLOGY_REVIEW.csv", "he_section_pathology_scores.csv", "he_measurement_records.schema-v2.jsonl", "he_review_aggregation.audit.json"],
       "acceptance": ["Reviewer cannot see genotype, infection or IF endpoint values during primary review.", "Rubric anchors define extent and severity separately and include representative examples.", "Intra-reviewer repeat and, when available, inter-reviewer agreement are reported before rubric lock.", "Unreviewed required objects block R2 and higher outputs."],
-      "remaining_blocker": "No review application, locked rubric or edit provenance exists."
+      "remaining_blocker": "The locked whole-section rubric, blinded package, strict review parser and audit-last aggregation gate exist, but all eight current section rows still require accepted biological review; geometry-edit provenance remains future work for mask-based endpoints."
     },
     {
-      "id": "HE-F10", "name": "Section metrics and technical-repeatability QC", "stages": ["H8"], "priority": "P1", "status": "UNAVAILABLE", "depends_on": ["HE-F04", "HE-F06", "HE-F09"],
+      "id": "HE-F10", "name": "Section metrics and technical-repeatability QC", "stages": ["H8"], "priority": "P1", "status": "ORDINAL_ENGINEERING_READY_QUANTITATIVE_ENDPOINTS_UNAVAILABLE", "depends_on": ["HE-F04", "HE-F06", "HE-F09"],
       "implementation": "Export calibrated section numerators and denominators for every endpoint. Compare BF_01 with BF_02 as technical sections using paired difference plots, absolute and relative difference and an agreement statistic chosen before inspection.",
-      "outputs": ["he_section_summary.csv", "he_technical_repeatability.csv", "qc/section_agreement.png"],
+      "outputs": ["he_section_pathology_scores.csv", "he_technical_section_agreement.csv", "future_quantitative_section_components.csv"],
       "acceptance": ["Each fraction can be recomputed exactly from exported numerator and denominator.", "Technical sections never increase biological n.", "Repeatability limits are established on a larger development cohort before confirmatory use."],
-      "remaining_blocker": "The pilot exports section QC proxies but no calibrated endpoint components or repeatability decision."
+      "remaining_blocker": "The ordinal path retains paired technical-section values, minimum/maximum and exact agreement without inventing a composite. Quantitative H5-H6 endpoints and larger-cohort repeatability limits still require labelled development and validation."
     },
     {
-      "id": "HE-F11", "name": "Fail-closed section-to-mouse aggregation", "stages": ["H8"], "priority": "P0", "status": "UNAVAILABLE", "depends_on": ["HE-F09", "HE-F10"],
+      "id": "HE-F11", "name": "Fail-closed section-to-mouse aggregation", "stages": ["H8"], "priority": "P0", "status": "ORDINAL_ENGINEERING_READY_REVIEW_REQUIRED", "depends_on": ["HE-F09", "HE-F10"],
       "implementation": "Verify the expected section set, QC and review state, then pool raw numerators and denominators within mouse. Retain section rows and prespecify the ordinal mouse summary. Emit no mouse result when a required section or review is missing.",
-      "outputs": ["he_mouse_summary.csv", "he_aggregation_audit.json", "incomplete_mouse_failures.csv"],
+      "outputs": ["he_mouse_pathology_summary.csv", "he_review_aggregation.audit.json", "he_measurement_records.schema-v2.jsonl"],
       "acceptance": ["Mouse fractions equal sum(section numerators) divided by sum(section denominators).", "Incomplete, duplicate or mismatched section identity fails closed.", "The current four-mouse cohort remains descriptive and cannot emit group hypothesis tests."],
-      "remaining_blocker": "No H&E mouse summary or aggregation engine exists."
+      "remaining_blocker": "The strict ordinal section-to-mouse engine exists and publishes nothing for an incomplete or invalid review. Current biological review is incomplete, and future quantitative fractions still require validated H5-H6 numerators and denominators."
     },
     {
       "id": "HE-F12", "name": "Mouse-level H&E to IF association", "stages": ["H9"], "priority": "P2", "status": "UNAVAILABLE", "depends_on": ["HE-F11"],
@@ -105,11 +105,11 @@
       "remaining_blocker": "Route 3 is intentionally disabled and has no production runner or review workflow."
     },
     {
-      "id": "HE-F14", "name": "Validation, provenance and reporting package", "stages": ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"], "priority": "P0", "status": "R1_PROVENANCE_VERIFIED", "depends_on": ["HE-F01"],
+      "id": "HE-F14", "name": "Validation, provenance and reporting package", "stages": ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"], "priority": "P0", "status": "R1_PROVENANCE_VERIFIED_H7_H8_AUDIT_READY", "depends_on": ["HE-F01"],
       "implementation": "Hash configuration, scripts, classifiers and stain profiles; record QuPath and reader versions, calibrated resolution, source identity, exclusions, reviewer actions and run tier. Keep development, tuning and locked validation sets separate at mouse/slide level and report all failures.",
       "outputs": ["he_run_manifest.json", "provenance/", "validation_report.md", "machine_readable_validation.json"],
       "acceptance": ["Every result is traceable to immutable inputs, code, profile and review state.", "No patch or section from one mouse appears in both development and locked validation partitions.", "The report states experimental unit, exclusions, blinding, sample-size basis and uncertainty.", "Automation performance is reported by section and mouse, not only as pooled pixels."],
-      "remaining_blocker": "Pilot provenance exists, but classifier partitions, reviewer provenance and locked validation reports do not."
+      "remaining_blocker": "Exact raw VSI packages, R1/H4 packages, the locked rubric and H7/H8 output audit are content-bound. H5-H6 classifier partitions, completed reviewer evidence and locked biological validation reports do not yet exist."
     }
   ],
   "launcher_enablement": {

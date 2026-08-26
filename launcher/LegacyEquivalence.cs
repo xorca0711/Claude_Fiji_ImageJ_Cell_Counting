@@ -572,7 +572,8 @@ namespace IFQuantLauncher.LegacyCheck
                 try
                 {
                     RunEnvironment.BuildStage2(
-                        legacyRequest, null, null, "r", "o", Path.GetTempPath(), null, false);
+                        legacyRequest, null, null, "r", "engine.groovy",
+                        "o", Path.GetTempPath(), null, false);
                 }
                 catch (InvalidOperationException) { refused = true; }
                 Check(refused, "RunEnvironment.BuildStage2 refuses route 4 outright");

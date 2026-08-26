@@ -21,7 +21,7 @@
     "qc"
   ],
   "properties": {
-    "schema_version": {"const": "1.0.0"},
+    "schema_version": {"const": "2.0.0"},
     "record_id": {"type": "string", "minLength": 1},
     "track": {"enum": ["area_wsi", "cell_confocal", "he_pathology"]},
     "record_level": {"enum": ["cell", "region", "field", "tile", "section", "slide", "mouse"]},
@@ -49,7 +49,8 @@
       "if": {"properties": {"track": {"const": "area_wsi"}}, "required": ["track"]},
       "then": {
         "properties": {
-          "record_level": {"enum": ["region", "tile", "section", "slide", "mouse"]}
+          "record_level": {"enum": ["region", "tile", "section", "slide", "mouse"]},
+          "endpoint": {"properties": {"calculation": {"const": "ratio"}}}
         }
       }
     },
@@ -57,7 +58,8 @@
       "if": {"properties": {"track": {"const": "cell_confocal"}}, "required": ["track"]},
       "then": {
         "properties": {
-          "record_level": {"enum": ["cell", "region", "field", "mouse"]}
+          "record_level": {"enum": ["cell", "region", "field", "mouse"]},
+          "endpoint": {"properties": {"calculation": {"enum": ["ratio", "categorical_state"]}}}
         }
       }
     },
@@ -65,7 +67,8 @@
       "if": {"properties": {"track": {"const": "he_pathology"}}, "required": ["track"]},
       "then": {
         "properties": {
-          "record_level": {"enum": ["region", "section", "slide", "mouse"]}
+          "record_level": {"enum": ["region", "section", "slide", "mouse"]},
+          "endpoint": {"properties": {"calculation": {"enum": ["ratio", "categorical_state", "ordinal"]}}}
         }
       }
     },
@@ -270,6 +273,13 @@
       }
     },
     "endpoint": {
+      "oneOf": [
+        {"$ref": "#/$defs/ratioEndpoint"},
+        {"$ref": "#/$defs/categoricalStateEndpoint"},
+        {"$ref": "#/$defs/ordinalEndpoint"}
+      ]
+    },
+    "ratioEndpoint": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -350,6 +360,118 @@
         }
       ]
     },
+    "categoricalStateEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint_id",
+        "calculation",
+        "reference_space_id",
+        "evaluability",
+        "state",
+        "state_vocabulary_id",
+        "reason_code"
+      ],
+      "properties": {
+        "endpoint_id": {"type": "string", "minLength": 1},
+        "calculation": {"const": "categorical_state"},
+        "reference_space_id": {"type": "string", "minLength": 1},
+        "evaluability": {
+          "enum": ["measured", "not_evaluable", "not_applicable", "excluded"]
+        },
+        "state": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
+        "state_vocabulary_id": {"type": "string", "minLength": 1},
+        "reason_code": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"evaluability": {"const": "measured"}},
+            "required": ["evaluability"]
+          },
+          "then": {
+            "properties": {
+              "state": {"type": "string", "minLength": 1},
+              "reason_code": {"type": "null"}
+            }
+          },
+          "else": {
+            "properties": {
+              "state": {"type": "null"},
+              "reason_code": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "ordinalEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint_id",
+        "calculation",
+        "reference_space_id",
+        "evaluability",
+        "rank",
+        "minimum_rank",
+        "maximum_rank",
+        "scale_id",
+        "reason_code"
+      ],
+      "properties": {
+        "endpoint_id": {"type": "string", "minLength": 1},
+        "calculation": {"const": "ordinal"},
+        "reference_space_id": {"type": "string", "minLength": 1},
+        "evaluability": {
+          "enum": ["measured", "not_evaluable", "not_applicable", "excluded"]
+        },
+        "rank": {
+          "oneOf": [
+            {"type": "integer"},
+            {"type": "null"}
+          ]
+        },
+        "minimum_rank": {"type": "integer"},
+        "maximum_rank": {"type": "integer"},
+        "scale_id": {"type": "string", "minLength": 1},
+        "reason_code": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"evaluability": {"const": "measured"}},
+            "required": ["evaluability"]
+          },
+          "then": {
+            "properties": {
+              "rank": {"type": "integer"},
+              "reason_code": {"type": "null"}
+            }
+          },
+          "else": {
+            "properties": {
+              "rank": {"type": "null"},
+              "reason_code": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
     "sampling": {
       "type": "object",
       "additionalProperties": false,
@@ -362,7 +484,16 @@
             {"type": "null"}
           ]
         },
-        "selection_source": {"type": "string", "minLength": 1}
+        "selection_source": {"type": "string", "minLength": 1},
+        "estimand_scope": {
+          "enum": ["observed_units", "whole_section", "whole_lung"]
+        },
+        "estimator_profile_id": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
       },
       "allOf": [
         {
@@ -370,7 +501,12 @@
             "properties": {"design": {"const": "exhaustive"}},
             "required": ["design"]
           },
-          "then": {"properties": {"inclusion_probability": {"const": 1}}}
+          "then": {
+            "properties": {
+              "inclusion_probability": {"const": 1},
+              "estimator_profile_id": {"type": "null"}
+            }
+          }
         },
         {
           "if": {
@@ -378,12 +514,14 @@
             "required": ["design"]
           },
           "then": {
+            "required": ["estimator_profile_id"],
             "properties": {
               "inclusion_probability": {
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "maximum": 1
-              }
+              },
+              "estimator_profile_id": {"type": "string", "minLength": 1}
             }
           }
         },
@@ -392,7 +530,26 @@
             "properties": {"design": {"enum": ["purposive", "unknown"]}},
             "required": ["design"]
           },
-          "then": {"properties": {"inclusion_probability": {"type": "null"}}}
+          "then": {
+            "properties": {
+              "inclusion_probability": {"type": "null"},
+              "estimand_scope": {"const": "observed_units"},
+              "estimator_profile_id": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "estimand_scope": {"enum": ["whole_section", "whole_lung"]}
+            },
+            "required": ["estimand_scope"]
+          },
+          "then": {
+            "properties": {
+              "design": {"enum": ["exhaustive", "probability"]}
+            }
+          }
         }
       ]
     },

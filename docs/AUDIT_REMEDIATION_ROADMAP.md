@@ -1,7 +1,8 @@
 # Audit-driven evolution roadmap
 
-> **Status: PROPOSED.** This document converts the August 2026 technical and
-> scientific audit into implementation gates. It does not upgrade the validation
+> **Status: ENGINEERING IMPLEMENTED; SCIENTIFIC GATES OPEN.** This document
+> converts the August 2026 technical and scientific audit into implementation
+> and validation gates. The software milestones do not upgrade the validation
 > status of any endpoint or create new study evidence.
 
 ## Current evidence boundary
@@ -34,38 +35,67 @@ All three analytical tracks emit the versioned shared record defined by
 Schema conformance establishes identity, provenance, evaluability, and QC only;
 it is not scientific validation.
 
-**Implementation state:** the schema and its standard-library validator now
-exist, but legacy CSV producers and aggregators do not emit or consume the new
-record yet. This is a contract foundation, not a completed migration. Promotion
-requires route adapters plus aggregation integration tests; until then the
-legacy missing-to-zero and discovery risks remain open.
+**Implementation state:** the version 2 measurement-record schema, its
+standard-library validator, explicit
+ratio, categorical-state, and ordinal tabular builders, atomic JSONL writer,
+and batch aggregation eligibility checks now exist. Endpoint calculations are
+route-gated: area WSI accepts ratio records, confocal accepts ratio or
+categorical-state records, and H&E accepts ratio, categorical-state, or ordinal
+records. The batch contract rejects duplicate identities and channel, profile,
+configuration, code, model, sampling, compartment, vocabulary, scale, or unit
+drift within an endpoint scope. Purposive and unknown sampling are confined to
+the measured units; whole-section and whole-lung estimands require exhaustive
+or probability sampling. A probability record must name an estimator profile,
+and aggregation still fails unless the consuming route explicitly declares
+support for that exact profile. Legacy CSV producers and aggregators still do
+not acquire these semantics implicitly. Stage 4 now has an opt-in production
+bridge for the existing `area_wsi` and direct `cell_confocal` ratio paths: a
+closed panel specification supplies exact endpoint columns, identifiers,
+units, sampling, compartment, QC, and provenance; the bridge builds schema-v2
+records, calls batch eligibility before mouse pooling, and publishes the JSONL
+as a content-addressed member of the Stage 4 audit. WSI specifications are also
+cross-checked against the indexed profile/config/script/channel lineage. H&E
+`aggregate-review` emits the ordinal variant only from a complete, accepted
+eight-section blinded review and publishes its records and audit last; the
+current cohort has no complete review, so it produces no scientific result.
+Blanks are never inferred to mean either zero, `indeterminate`, or not
+evaluable. This is a software-contract migration, not an upgrade in scientific
+status.
 
-**2026-08-25 engineering progress:** provenance-safe WSI aggregation is now
-implemented around a per-slide, content-addressed Stage 2 run index. The index
-binds explicit shard assignments, samplesheets, tile/ROI inputs, engine,
-run-manifest configuration, ordered declared channel mappings, manifests,
-summaries, and natural
-section/region identities. Stage 3 no longer recursively discovers analytical
+**2026-08-26 engineering progress:** prospective provenance-safe WSI
+aggregation is implemented around a per-slide, content-addressed Stage 2 run
+index. The index binds explicit shard assignments, samplesheets, the complete
+Stage 1 candidate ledger, tile/ROI inputs, the engine, exact external
+configuration artifacts, normalized ImageJ/Bio-Formats/Java runtime identity,
+per-image parameter artifacts, ordered structured channel mappings, manifests,
+summaries, and natural section/region identities. Stable measurement-profile
+inputs are distinguished from observation-specific source, candidate, tile,
+and parameter hashes. Stage 3 no longer recursively discovers analytical
 summaries, and rejected attempts cannot leave an older accepted CSV at the
 canonical filename. Synthetic multi-shard, partition, overlap, duplicate,
 partial-run, path, and tamper cases fail closed. This closes roadmap step 2 at
-the software-contract level only: no local WSI run is promoted, because every
-inventoried WSI Stage 1 run is capped (`coverage_complete=false`). The shared
-measurement-record adapter and source-metadata channel verification in step 3
-remain open. Step 3 is partially implemented in the legacy CSV route:
+the software-contract level only. A real-source capped Stage 1/2 smoke verified
+the new source, script, candidate, channel, and reference-raster evidence, but
+no local WSI run is promoted because it is deliberately incomplete. The ratio
+adapter is wired into Stage 4 for explicit WSI and direct-confocal
+specifications; H&E review aggregation emits explicit ordinal records. The
+legacy CSV route also preserves its narrower descriptive compatibility:
 non-finite and partially missing additive measurements fail, wholly unavailable
 panel-specific markers remain blank instead of becoming zero, an emitted blank
 marker column is rejected when the indexed panel signature declares that
 marker, and Stage 4
 requires uniform indexed provenance across every mouse in a panel.
 
-The current index does not yet bind external panel/marker-registry file bytes or
-per-image `__params.json` snapshots into the cross-slide measurement profile,
-and it does not normalize ImageJ/Bio-Formats/Java versions for cohort-level
-comparison. Arbitrary custom acquisition-label aliases also need a structured
-marker ID before signature-to-summary evaluability can be enforced beyond the
-built-in panel labels. Those are explicit provenance follow-ups before a
-custom-panel or scientific WSI cohort is promoted.
+Stage 1 now records the acquisition metadata channel names and requires one
+position-specific full-match pattern per acquired channel. It content-binds the
+complete Olympus VSI/ETS package and exact Stage 1 script. Its automatic mode
+publishes the exact DAPI/Otsu engineering raster; its external-profile mode
+requires exact binary tissue and airway masks in the selected-series grid and
+publishes `tissue AND NOT airway`. Stage 2 re-hashes all of this. Source metadata
+still cannot prove that a 488/FITC channel contains the panel-declared marker,
+and an accepted external profile does not prove expert review. Biological stain
+identity, reviewed masks, prospective calibration, an uncapped run, and a
+reviewed endpoint specification remain mandatory before scientific promotion.
 
 | Track | Intended estimand | Required boundary |
 |---|---|---|
@@ -173,24 +203,28 @@ estimate.
 
 ### 6. StarDist as a validated segmentation route
 
-Cause: current StarDist execution is interactive, hardcoded, and lacks model
-hashing and QC equivalence; launcher probability/NMS settings are not consumed by
-the engine.
+Engineering status: implemented. StarDist now runs through the official SciJava
+command without an image window or ROI Manager, accepts only an explicit model
+archive, and consumes the command's label-Dataset output. A closed runtime
+manifest binds StarDist, CSBDeep, TensorFlow Java, and native-runtime artifacts;
+declared Java classes must actually load from their sealed files. Model/runtime
+bytes are checked before and after computation. Each exported label TIFF and a
+canonical unsigned-16-bit pixel stream are hashed. The classic and StarDist
+routes use the same in-region size/edge rejection ledger. See
+`docs/STARDIST_RUNTIME.md`.
 
-Remedy: make StarDist headless and deterministic, wire settings end to end,
-record the exact model hash, export labels, and use the same acceptance/rejection
-ledger as classic segmentation.
-
-Acceptance gate: configuration round-trips from launcher to manifest and engine;
-unsupported settings fail; model/profile hash is mandatory; segmentation gates
-from problem 1 pass before StarDist becomes a reportable primary route.
+Remaining acceptance gate: benchmark the sealed model and frozen probability,
+NMS, and tiling settings on blinded, representative expert annotations. The
+held-out biological segmentation gate from problem 1 must pass before StarDist
+becomes a reportable primary route.
 
 ### 7. Inefficient, duplicated, or obsolete processing
 
-Cause: recursive summary discovery permits stale rerun double-counting, resume
-checks rely on file existence, channel order is not strictly verified, missing
-values can become zero, status documentation is duplicated, and CI lacks image
-fixtures.
+Cause: the audited baseline allowed recursive summary discovery, existence-only
+resume, weak channel-order checks, and missing-to-zero aggregation; status
+documentation was duplicated and CI lacked image fixtures. Analytical recursive
+discovery is now disabled, Stage 1 resume is refused, ordered acquisition labels
+and missingness fail closed, and prospective indexes bind explicit artifacts.
 
 Remedy: use one authoritative run index; reject duplicate analytical identities;
 make resume content-addressed; enforce ordered channel signatures; preserve
@@ -209,16 +243,20 @@ they validate mechanics or science.
    validate privacy and critical claim states; introduce the shared record schema.
 2. **Provenance-safe aggregation (implemented; prospective runs only).** Replace analytical recursive discovery with
    an explicit hashed Stage 2 run index and duplicate-key rejection.
-3. **Evaluability and channel order (partially implemented).** Missing-to-zero
-   coercion is blocked for additive panel-specific measurements and declared
-   channel order is exact. Shared-record adapters, external-config/parameter
-   snapshots, runtime-profile comparison, and source-metadata verification are
-   still open.
-4. **WSI masks and sampling.** Implement global tissue/airway masks and record
-   exhaustive/probability sampling semantics.
-5. **Segmentation validation.** Implement the headless StarDist/classic benchmark
-   against frozen ground truth.
-6. **H&E validation ladder.** Complete anatomy through blinded mouse aggregation.
+3. **Evaluability and channel order (engineering implemented).** Missing-to-zero
+   coercion is blocked; ordered source labels, structured panel mappings,
+   generic ratio/categorical/ordinal adapters, estimand-aware eligibility,
+   route wiring, external configuration, runtime identity, raw packages, and
+   code bytes are bound. Biological stain identity remains a protocol check.
+4. **WSI masks and sampling (mechanics implemented).** Automatic engineering and
+   exact external tissue-minus-airway reference spaces exist. Expert mask review,
+   frozen calibration, uncapped coverage, and cohort validation remain.
+5. **Segmentation validation (software route implemented).** Replay the sealed
+   StarDist runtime/model on a supported deployment fixture and benchmark it
+   against frozen blinded ground truth.
+6. **H&E validation ladder (review/aggregation mechanics implemented).** Complete
+   blinded section review and expert validation of anatomy, candidates, and
+   topology before interpreting the emitted ordinal mouse summary.
 7. **Prospective study.** Use biologically replicated design and prospectively
    account for attrition/survival before testing genotype or interaction effects.
 
@@ -229,7 +267,8 @@ probability or exhaustive sampling, anatomical/airway ground truth, marker and
 endpoint calibration, and blinded H&E validation. More software cannot repair
 those properties in the current cohort.
 
-Engineering priorities are authoritative state, explicit run indices, duplicate
-rejection, content-addressed resume, ordered-channel validation, evaluability
-propagation, deterministic model provenance, and executable fixtures. These make
-future evidence auditable but do not by themselves make it scientifically valid.
+The repository now implements authoritative state, explicit run indices,
+duplicate rejection, fresh/atomic publication, ordered-channel validation,
+evaluability propagation, deterministic model provenance, route adapters, and
+executable rejection fixtures. Remaining deployment-fixture replay and expert
+reviews are validation checks; they cannot be replaced by more software.

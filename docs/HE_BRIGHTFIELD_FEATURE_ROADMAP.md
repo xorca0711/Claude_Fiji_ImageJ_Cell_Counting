@@ -1,9 +1,13 @@
 # H&E brightfield feature roadmap
 
-> **Status: R1 approved / R2 development.** Image QC and the usable-tissue
-> denominator are approved for the current cohort through H3. H4 context and the
-> H7 whole-section rubric are development inputs; H5-H6 measurement and all
-> mouse-level reporting remain unavailable. Route 3 remains disabled.
+> **Status: R1 approved / H7-H8 engineering ready / biological review
+> required.** Image QC and the usable-tissue denominator are approved for the
+> current cohort through H3. H4 context and the locked H7 whole-section rubric
+> are development inputs. Strict ordinal review parsing, schema-v2 section
+> records, technical-section agreement and non-composite mouse summaries are
+> implemented, but publish nothing until all eight biological review rows are
+> accepted. H5-H6 quantitative measurement remains unavailable and Route 3
+> remains disabled.
 
 The machine-readable source of truth is
 `config/brightfield/he_feature_roadmap.json`. The existing decision hierarchy
@@ -59,9 +63,9 @@ route is not equivalent to authorizing every downstream result.
 | HE-F02 frozen batch stain profile | H2 | reviewed background + H/E vectors, separation contact sheet, named hashed JSON | reviewer sign-off across all sections; hash consumed by runner |
 | HE-F03 artifact masks | H2-H3 | distinct pen, dust, saturation, fold, tear, bubble and blur classes | per-class overlay and denominator reconciliation; locked audit |
 | HE-F04 usable-tissue mask | H3 | saved QuPath thresholder or compact classifier with Tissue/Glass/Ignore* | mouse/slide-separated audit; fail on denominator or profile drift |
-| HE-F09 blinded review + rubric | H7 | label-blinded queue, geometry edits, locked ordinal anchors and audit | complete review, repeat agreement, immutable edit provenance |
-| HE-F11 mouse aggregation | H8 | pooled raw components, completeness gate, ordinal summary rule | exact recomputation; fail closed on missing or duplicate sections |
-| HE-F14 validation/provenance | all | hashes, versions, partitions, failures, exclusions and uncertainty | no mouse leakage between development and locked validation |
+| HE-F09 blinded review + rubric | H7 | **locked whole-section rubric, blinded package, strict parser and audit-last publication implemented**; geometry-edit workflow remains for mask endpoints | complete accepted review, repeat agreement, immutable edit provenance |
+| HE-F11 mouse aggregation | H8 | **ordinal completeness gate and non-composite paired-section mouse summary implemented**; quantitative raw-component pooling remains future work | fail closed on missing, duplicate, ineligible or vocabulary-drifted sections |
+| HE-F14 validation/provenance | all | exact raw/R1/H4 hashes plus **H7/H8 input/output audit implemented**; classifier partitions remain future work | no mouse leakage between development and locked validation |
 
 ### P1 — pathology candidates and operator workflow
 
@@ -71,7 +75,7 @@ route is not equivalent to authorizing every downstream result.
 | HE-F06 nuclei/cellularity | H5 | hematoxylin or OD-sum detection inside usable tissue | blinded point-count bias/precision by compartment |
 | HE-F07 PR8 injury candidates | H5 | multi-scale interstitial/alveolar inflammation, consolidation, cuff and epithelial-injury candidates | locked per-class holdout; no group label as a feature |
 | HE-F08 topology authorization | H6 | boundary-contact and containment rules; Indeterminate path | decision log plus synthetic geometry and WSI audit |
-| HE-F10 technical repeatability | H8 | BF_01/BF_02 paired differences and prespecified agreement statistic | larger development-cohort repeatability limits |
+| HE-F10 technical repeatability | H8 | **ordinal paired values, range and exact agreement implemented**; quantitative BF_01/BF_02 differences remain future work | larger development-cohort repeatability limits |
 | HE-F13 launcher Route 3 | H0-H8 | H&E screen, stain-profile and tier selectors, review/resume | fail-closed self-tests for every dependency |
 
 ### P2 — multimodal integration

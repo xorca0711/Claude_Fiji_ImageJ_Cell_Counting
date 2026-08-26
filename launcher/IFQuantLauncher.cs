@@ -7,6 +7,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,14 +15,15 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using IFQuantLauncher.Routing;
+using Microsoft.Win32.SafeHandles;
 
 [assembly: AssemblyTitle("IF Quant Launcher")]
 [assembly: AssemblyDescription("Windows launcher for the Fiji morphology-primary IF quantification pipeline")]
 [assembly: AssemblyCompany("IF Quant Pipeline")]
 [assembly: AssemblyProduct("IF Quant Launcher")]
 [assembly: AssemblyCopyright("Research software")]
-[assembly: AssemblyVersion("1.9.5.0")]
-[assembly: AssemblyFileVersion("1.9.5.0")]
+[assembly: AssemblyVersion("1.9.7.0")]
+[assembly: AssemblyFileVersion("1.9.7.0")]
 
 namespace IFQuantLauncher
 {
@@ -30,6 +32,66 @@ namespace IFQuantLauncher
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args != null && args.Length > 0 &&
+                string.Equals(args[0], "--contained-stage", StringComparison.Ordinal))
+            {
+                Environment.ExitCode = RunContainedStage(args);
+                return;
+            }
+
+            if (args != null && args.Length > 0 &&
+                string.Equals(args[0], "--argv-echo", StringComparison.Ordinal))
+            {
+                if (args.Length < 2)
+                {
+                    Environment.ExitCode = 2;
+                    return;
+                }
+                using (FileStream output = new FileStream(
+                           args[1], FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (StreamWriter writer = new StreamWriter(output, new UTF8Encoding(false)))
+                    for (int index = 2; index < args.Length; index++)
+                    {
+                        string encoded = Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes(args[index] ?? ""));
+                        writer.WriteLine(
+                            (index - 2).ToString(CultureInfo.InvariantCulture) +
+                            ":" + encoded);
+                    }
+                return;
+            }
+
+            // Used only by the packaged process-containment self-test. It
+            // intentionally creates a descendant immediately: the gated
+            // contained-stage launcher must make that race safe.
+            if (args != null && args.Length > 0 &&
+                string.Equals(args[0], "--job-self-test-child", StringComparison.Ordinal))
+            {
+                if (args.Length < 2)
+                {
+                    Environment.ExitCode = 2;
+                    return;
+                }
+                string ping = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE");
+                ProcessStartInfo pingInfo = new ProcessStartInfo();
+                pingInfo.FileName = ping;
+                pingInfo.Arguments = "-n 30 127.0.0.1";
+                pingInfo.UseShellExecute = false;
+                pingInfo.CreateNoWindow = true;
+                using (Process descendant = Process.Start(pingInfo))
+                {
+                    using (FileStream signal = new FileStream(
+                               args[1], FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                    using (StreamWriter writer = new StreamWriter(
+                               signal, new UTF8Encoding(false)))
+                        writer.WriteLine(
+                            descendant.Id.ToString(CultureInfo.InvariantCulture));
+                    descendant.WaitForExit();
+                }
+                return;
+            }
+
             if (args != null && args.Length > 0 &&
                 string.Equals(args[0], "--self-test", StringComparison.OrdinalIgnoreCase))
             {
@@ -79,6 +141,418 @@ namespace IFQuantLauncher
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
         }
+
+        private static int RunContainedStage(string[] args)
+        {
+            if (args == null || args.Length != 5)
+            {
+                Console.Error.WriteLine("contained-stage: invalid argument count");
+                return 125;
+            }
+            try
+            {
+                using (EventWaitHandle gate = EventWaitHandle.OpenExisting(args[1]))
+                    if (!gate.WaitOne(30000))
+                        throw new TimeoutException(
+                            "The parent did not release the contained-stage launch gate.");
+
+                ProcessStartInfo targetInfo = new ProcessStartInfo();
+                targetInfo.FileName = args[2];
+                targetInfo.Arguments = args[3];
+                targetInfo.WorkingDirectory = args[4];
+                targetInfo.UseShellExecute = false;
+                targetInfo.CreateNoWindow = true;
+                targetInfo.RedirectStandardOutput = true;
+                targetInfo.RedirectStandardError = true;
+
+                using (ManualResetEvent outputDone = new ManualResetEvent(false))
+                using (ManualResetEvent errorDone = new ManualResetEvent(false))
+                using (Process target = new Process())
+                {
+                    target.StartInfo = targetInfo;
+                    target.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                    {
+                        if (e.Data == null) outputDone.Set();
+                        else Console.Out.WriteLine(e.Data);
+                    };
+                    target.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                    {
+                        if (e.Data == null) errorDone.Set();
+                        else Console.Error.WriteLine(e.Data);
+                    };
+                    target.Start();
+                    target.BeginOutputReadLine();
+                    target.BeginErrorReadLine();
+                    target.WaitForExit();
+                    if (!outputDone.WaitOne(5000) || !errorDone.WaitOne(5000))
+                        throw new IOException(
+                            "The contained stage exited before its redirected output drained.");
+                    return target.ExitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("contained-stage: " + ex);
+                return 125;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rewrites a target ProcessStartInfo to start this executable in a helper
+    /// mode that waits on a named event. The parent starts and assigns that
+    /// helper to the Job Object before releasing the event; only then can the
+    /// real target be created, and Windows automatically places descendants of
+    /// a job member into the same job. This closes the Start-before-Assign race
+    /// without losing ProcessStartInfo's sealed environment.
+    /// </summary>
+    internal sealed class ContainedStageLaunch : IDisposable
+    {
+        private EventWaitHandle gate;
+
+        private ContainedStageLaunch(EventWaitHandle value)
+        {
+            gate = value;
+        }
+
+        public static ContainedStageLaunch Prepare(ProcessStartInfo targetInfo)
+        {
+            if (targetInfo == null) throw new ArgumentNullException("targetInfo");
+            if (string.IsNullOrWhiteSpace(targetInfo.FileName))
+                throw new InvalidOperationException("Contained stage has no executable path.");
+
+            string targetFileName = targetInfo.FileName;
+            string targetArguments = targetInfo.Arguments ?? "";
+            string targetWorkingDirectory = targetInfo.WorkingDirectory ?? "";
+            string gateName = @"Local\IFQuantLauncher.StageGate." +
+                              Guid.NewGuid().ToString("N");
+            EventWaitHandle gate = new EventWaitHandle(
+                false, EventResetMode.ManualReset, gateName);
+            try
+            {
+                targetInfo.FileName = Assembly.GetExecutingAssembly().Location;
+                targetInfo.Arguments =
+                    WindowsCommandLine.Quote("--contained-stage") + " " +
+                    WindowsCommandLine.Quote(gateName) + " " +
+                    WindowsCommandLine.Quote(targetFileName) + " " +
+                    WindowsCommandLine.Quote(targetArguments) + " " +
+                    WindowsCommandLine.Quote(targetWorkingDirectory);
+                return new ContainedStageLaunch(gate);
+            }
+            catch
+            {
+                gate.Dispose();
+                throw;
+            }
+        }
+
+        public void Release()
+        {
+            if (gate == null) throw new ObjectDisposedException("ContainedStageLaunch");
+            gate.Set();
+        }
+
+        public void Dispose()
+        {
+            if (gate == null) return;
+            gate.Dispose();
+            gate = null;
+        }
+    }
+
+    /// <summary>
+    /// Per-stage Windows Job Object. KILL_ON_JOB_CLOSE contains descendants,
+    /// and cancellation is considered complete only after the kernel reports
+    /// ActiveProcesses == 0. A private lock makes termination and disposal
+    /// mutually exclusive when the UI races the worker's finally block.
+    /// </summary>
+    internal sealed class ProcessJob : IDisposable
+    {
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const int JobObjectBasicAccountingInformation = 1;
+        private const int JobObjectExtendedLimitInformation = 9;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BasicLimitInformation
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ExtendedLimitInformation
+        {
+            public BasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BasicAccountingInformation
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateJobObject(
+            IntPtr jobAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            SafeFileHandle job, int informationClass,
+            ref ExtendedLimitInformation information, uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(
+            SafeFileHandle job, IntPtr processHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(
+            SafeFileHandle job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            SafeFileHandle job, int informationClass,
+            ref BasicAccountingInformation information, uint informationLength,
+            IntPtr returnLength);
+
+        private readonly object sync = new object();
+        private SafeFileHandle handle;
+
+        private ProcessJob(SafeFileHandle value)
+        {
+            handle = value;
+        }
+
+        public static ProcessJob CreateArmed()
+        {
+            SafeFileHandle value = CreateJobObject(IntPtr.Zero, null);
+            if (value == null || value.IsInvalid)
+                throw NativeFailure("CreateJobObject");
+
+            ExtendedLimitInformation limits = new ExtendedLimitInformation();
+            limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            if (!SetInformationJobObject(
+                    value, JobObjectExtendedLimitInformation, ref limits,
+                    (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation))))
+            {
+                Exception error = NativeFailure("SetInformationJobObject");
+                value.Dispose();
+                throw error;
+            }
+            return new ProcessJob(value);
+        }
+
+        public void AssignOrTerminate(Process process)
+        {
+            if (process == null) throw new ArgumentNullException("process");
+            lock (sync)
+            {
+                RequireOpen();
+                if (AssignProcessToJobObject(handle, process.Handle)) return;
+
+                Exception error = NativeFailure("AssignProcessToJobObject");
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                        process.WaitForExit(5000);
+                    }
+                }
+                catch { }
+                throw new InvalidOperationException(
+                    "The stage started but could not be placed in its required process " +
+                    "containment Job Object. The root was terminated and the run was refused.",
+                    error);
+            }
+        }
+
+        public bool TerminateAndWait(
+            Process rootProcess, int timeoutMilliseconds, out string failure)
+        {
+            failure = null;
+            lock (sync)
+            {
+                if (handle == null || handle.IsClosed || handle.IsInvalid)
+                {
+                    failure = "The containment Job Object was already closed.";
+                    return false;
+                }
+
+                uint active;
+                if (!TryReadActiveProcesses(out active, out failure)) return false;
+                if (active > 0 && !TerminateJobObject(handle, 1))
+                {
+                    failure = NativeFailure("TerminateJobObject").Message;
+                    return false;
+                }
+
+                Stopwatch timer = Stopwatch.StartNew();
+                while (timer.ElapsedMilliseconds < timeoutMilliseconds)
+                {
+                    if (!TryReadActiveProcesses(out active, out failure)) return false;
+                    if (active == 0)
+                    {
+                        try
+                        {
+                            int remaining = Math.Max(
+                                0, timeoutMilliseconds - (int)timer.ElapsedMilliseconds);
+                            if (rootProcess != null && !rootProcess.HasExited &&
+                                !rootProcess.WaitForExit(remaining))
+                            {
+                                failure = "The Job Object is empty but its root process handle " +
+                                          "did not reach a terminal state.";
+                                return false;
+                            }
+                        }
+                        catch (InvalidOperationException) { }
+                        return true;
+                    }
+                    Thread.Sleep(25);
+                }
+
+                failure = "Timed out waiting for the containment Job Object to report zero " +
+                          "active processes (remaining: " + active + ").";
+                return false;
+            }
+        }
+
+        private bool TryReadActiveProcesses(out uint active, out string failure)
+        {
+            BasicAccountingInformation accounting = new BasicAccountingInformation();
+            if (!QueryInformationJobObject(
+                    handle, JobObjectBasicAccountingInformation, ref accounting,
+                    (uint)Marshal.SizeOf(typeof(BasicAccountingInformation)), IntPtr.Zero))
+            {
+                active = UInt32.MaxValue;
+                failure = NativeFailure("QueryInformationJobObject").Message;
+                return false;
+            }
+            active = accounting.ActiveProcesses;
+            failure = null;
+            return true;
+        }
+
+        private void RequireOpen()
+        {
+            if (handle == null || handle.IsClosed || handle.IsInvalid)
+                throw new ObjectDisposedException("ProcessJob");
+        }
+
+        private static Exception NativeFailure(string operation)
+        {
+            return new InvalidOperationException(
+                operation + " failed with Win32 error " +
+                Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ".");
+        }
+
+        public void Dispose()
+        {
+            lock (sync)
+            {
+                if (handle == null) return;
+                handle.Dispose();
+                handle = null;
+            }
+        }
+
+        internal static bool SelfTest(string executablePath)
+        {
+            Process child = null;
+            ProcessJob job = null;
+            ContainedStageLaunch containedLaunch = null;
+            string signalPath = Path.Combine(
+                Path.GetTempPath(), "IFQuantLauncher-job-" +
+                Guid.NewGuid().ToString("N") + ".txt");
+            try
+            {
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = executablePath;
+                info.Arguments =
+                    WindowsCommandLine.Quote("--job-self-test-child") + " " +
+                    WindowsCommandLine.Quote(signalPath);
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+                info.WorkingDirectory = Path.GetDirectoryName(executablePath);
+                info.RedirectStandardOutput = true;
+                info.RedirectStandardError = true;
+                containedLaunch = ContainedStageLaunch.Prepare(info);
+                child = new Process();
+                child.StartInfo = info;
+
+                job = CreateArmed();
+                child.Start();
+                job.AssignOrTerminate(child);
+                containedLaunch.Release();
+
+                int descendantId = 0;
+                Stopwatch signalTimer = Stopwatch.StartNew();
+                while (descendantId == 0 && signalTimer.ElapsedMilliseconds < 5000)
+                {
+                    if (child.HasExited) return false;
+                    try
+                    {
+                        if (File.Exists(signalPath))
+                            Int32.TryParse(
+                                File.ReadAllText(signalPath, Encoding.UTF8).Trim(),
+                                NumberStyles.None, CultureInfo.InvariantCulture,
+                                out descendantId);
+                    }
+                    catch (IOException) { }
+                    Thread.Sleep(25);
+                }
+                if (descendantId == 0) return false;
+                string failure;
+                if (!job.TerminateAndWait(child, 10000, out failure)) return false;
+                try
+                {
+                    using (Process descendant = Process.GetProcessById(descendantId))
+                        if (!descendant.WaitForExit(3000)) return false;
+                }
+                catch (ArgumentException)
+                {
+                    // No process with that PID: it was terminated with the job.
+                }
+                return true;
+            }
+            catch { return false; }
+            finally
+            {
+                if (job != null) job.Dispose();
+                if (containedLaunch != null) containedLaunch.Dispose();
+                if (child != null) child.Dispose();
+                try { if (File.Exists(signalPath)) File.Delete(signalPath); } catch { }
+            }
+        }
     }
 
     // partial: the route selector, the threshold grid, the fail-closed gate
@@ -96,6 +570,10 @@ namespace IFQuantLauncher
         private TextBox advancedBox;
         private ComboBox panelBox;
         private ComboBox segmenterBox;
+        private TableLayoutPanel starDistAuthorityPanel;
+        private TextBox starDistModelPathBox;
+        private TextBox starDistRuntimeManifestBox;
+        private Label starDistAuthorityStatusLabel;
         private ComboBox projectionBox;
         private ComboBox tissueModeBox;
         private ComboBox compartmentModeBox;
@@ -134,9 +612,14 @@ namespace IFQuantLauncher
         private bool adjustingConfigPane;
 
         private Process runningProcess;
+        private ProcessJob runningProcessJob;
         private string lastRunDirectory;
         private string lastSummaryPath;
-        private bool cancellationRequested;
+        private int cancellationRequested;
+        private int cancellationTerminationConfirmed;
+        private int runActive;
+        private int closeAfterCancellation;
+        private bool bypassClosePrompt;
         private bool runningPreview;
         private readonly object processLock = new object();
 
@@ -168,13 +651,16 @@ namespace IFQuantLauncher
             {
                 "IFQ_INPUT_DIR", "IFQ_OUTPUT_DIR", "IFQ_PANEL",
                 "IFQ_MARKER_REGISTRY", "IFQ_PANEL_CONFIG", "IFQ_PANEL_MAP_PATH",
+                "IFQ_ENGINE_SCRIPT_PATH",
                 "IFQ_RECURSIVE", "IFQ_INCLUDE_REGEX", "IFQ_MAX_IMAGES",
                 "IFQ_SEGMENTER", "IFQ_PROJECTION", "IFQ_SINGLE_PLANE",
                 "IFQ_EXPORT_DISPLAY_CHANNELS", "IFQ_DISPLAY_PREVIEW_ONLY",
                 "IFQ_DISPLAY_SCALE_BAR_UM", "IFQ_DISPLAY_SCALE_BAR_THICKNESS_PX",
                 "IFQ_TISSUE_MODE", "IFQ_COMPARTMENT_MODE",
                 "IFQ_WHOLE_FIELD_COMPARTMENT",
-                "IFQ_ALLOW_NONEMPTY_OUTPUT", "IFQ_MORPHOLOGY_PRIMARY"
+                "IFQ_ALLOW_NONEMPTY_OUTPUT", "IFQ_MORPHOLOGY_PRIMARY",
+                "IFQ_WSI_STAGE1_SCRIPT_PATH", "IFQ_WSI_REFERENCE_MASK_PROFILE",
+                "IFQ_STARDIST_MODEL_PATH", "IFQ_STARDIST_RUNTIME_MANIFEST"
             };
 
         private static readonly HashSet<string> SupportedImageExtensions =
@@ -208,23 +694,58 @@ namespace IFQuantLauncher
 
             FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
-                lock (processLock)
+                if (bypassClosePrompt)
                 {
-                    if (runningProcess != null && !runningProcess.HasExited)
+                    SaveSettings();
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref runActive, 0, 0) != 0)
+                {
+                    if (Interlocked.CompareExchange(
+                            ref cancellationTerminationConfirmed, 0, 0) != 0)
                     {
-                        DialogResult result = MessageBox.Show(
-                            this,
-                            "Fiji is still running. Cancel the analysis and close?",
-                            "Analysis in progress",
-                            MessageBoxButtons.YesNo,
-                            MessageBoxIcon.Warning);
-                        if (result != DialogResult.Yes)
-                        {
-                            e.Cancel = true;
-                            return;
-                        }
-                        CancelRunningProcess();
+                        // Termination has already been confirmed. Keep the
+                        // form alive only long enough for the worker to write
+                        // its terminal record and clean temporary state; do
+                        // not ask the operator to confirm the same cancel a
+                        // second time.
+                        e.Cancel = true;
+                        Interlocked.Exchange(ref closeAfterCancellation, 1);
+                        return;
                     }
+
+                    DialogResult result = MessageBox.Show(
+                        this,
+                        "An analysis stage is still active. Cancel the complete process tree " +
+                        "and close after terminal cleanup?",
+                        "Analysis in progress",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (result != DialogResult.Yes)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+
+                    // Always keep the form alive until the worker has observed
+                    // the durable latch, written its terminal record and run
+                    // cleanup. This path owns the only confirmation prompt.
+                    e.Cancel = true;
+                    Interlocked.Exchange(ref closeAfterCancellation, 1);
+                    string cancellationFailure;
+                    if (!RequestCancellationAndTerminate(out cancellationFailure))
+                    {
+                        Interlocked.Exchange(ref closeAfterCancellation, 0);
+                        MessageBox.Show(
+                            this,
+                            "The process tree could not be confirmed terminated, so the " +
+                            "launcher will remain open.\r\n\r\n" + cancellationFailure,
+                            "Cancellation incomplete",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }
+                    return;
                 }
                 SaveSettings();
             };
@@ -517,22 +1038,28 @@ namespace IFQuantLauncher
             settings.SetColumnSpan(panelHelpLabel, 4);
 
             AddWideSetting(settings, 2, "Nucleus detection", segmenterBox);
-            AddWideSetting(settings, 3, "Z-stack handling", projectionBox);
-            AddWideSetting(settings, 4, "Tissue boundary", tissueModeBox);
-            AddWideSetting(settings, 5, "Anatomical gate", compartmentModeBox);
+            starDistAuthorityPanel = BuildStarDistAuthorityPanel();
+            settings.Controls.Add(starDistAuthorityPanel, 0, 3);
+            settings.SetColumnSpan(starDistAuthorityPanel, settings.ColumnCount);
+            AddWideSetting(settings, 4, "Z-stack handling", projectionBox);
+            AddWideSetting(settings, 5, "Tissue boundary", tissueModeBox);
+            AddWideSetting(settings, 6, "Anatomical gate", compartmentModeBox);
 
             singlePlaneBox = new NumericUpDown();
             singlePlaneBox.Minimum = -1;
             singlePlaneBox.Maximum = 10000;
             singlePlaneBox.Value = -1;
             singlePlaneBox.Dock = DockStyle.Fill;
-            AddSetting(settings, 6, 0, "Whole-image tissue type", wholeCompartmentBox);
-            AddSetting(settings, 6, 2, "Z-plane (-1 = middle)", singlePlaneBox);
+            AddSetting(settings, 7, 0, "Whole-image tissue type", wholeCompartmentBox);
+            AddSetting(settings, 7, 2, "Z-plane (-1 = middle)", singlePlaneBox);
 
             panelBox.SelectedIndexChanged += delegate { UpdatePanelHelp(); };
             panelBox.TextChanged += delegate { UpdatePanelHelp(); };
             toolTips.SetToolTip(panelBox, "AUTO assigns each matching image independently from marker names in its file/folder path, then applies that built-in panel's fixed acquisition channel order. Multiple recognized panels may share one run. Unknown images stop for manual review; stains are not inferred from colors or intensity.");
-            toolTips.SetToolTip(segmenterBox, "Classic is the safest first choice. Choose StarDist only when that Fiji installation has the plugin and model.");
+            toolTips.SetToolTip(segmenterBox,
+                "Classic is the safest first choice. StarDist additionally requires an " +
+                "explicit exported .zip model and a closed runtime manifest for the exact " +
+                "plugin, CSBDeep and TensorFlow artifacts Fiji loads.");
             toolTips.SetToolTip(projectionBox, "Layer-aware mode keeps DAPI across the stack, selects a DAPI-guided cell-body slab, and selects a marker-guided apical slab. Review the saved Z profile and freeze explicit ranges before confirmatory analysis.");
             toolTips.SetToolTip(singlePlaneBox, "Used only when Z-stack handling is single. -1 asks the pipeline to use the middle plane.");
             toolTips.SetToolTip(tissueModeBox, "Auto excludes empty background. Whole field is appropriate only when the entire image should be analyzed.");
@@ -1534,7 +2061,7 @@ namespace IFQuantLauncher
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
-                dialog.Title = "Select a study panel JSON file";
+                dialog.Title = "Select a JSON file";
                 dialog.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*";
                 dialog.CheckFileExists = true;
                 if (File.Exists(target.Text))
@@ -1640,7 +2167,8 @@ namespace IFQuantLauncher
             if (!(previewOnly ? ConfirmDisplayPreview(config) : ConfirmRouteRun(config)))
                 return;
 
-            Directory.CreateDirectory(config.OutputDirectory);
+            if (config.Request.Route != ImageRoute.IfSlideScanner)
+                Directory.CreateDirectory(config.OutputDirectory);
             try
             {
                 // H4, for real this time: the folder now exists, so check what
@@ -1657,9 +2185,10 @@ namespace IFQuantLauncher
             logBox.Clear();
             lastRunDirectory = config.OutputDirectory;
             lastSummaryPath = null;
-            cancellationRequested = false;
+            Interlocked.Exchange(ref cancellationRequested, 0);
+            Interlocked.Exchange(ref cancellationTerminationConfirmed, 0);
             runningPreview = previewOnly;
-            openOutputButton.Enabled = true;
+            openOutputButton.Enabled = Directory.Exists(config.OutputDirectory);
             openSummaryButton.Enabled = false;
             SetProgressPreparing();
 
@@ -1736,19 +2265,34 @@ namespace IFQuantLauncher
                     HandleFijiLine(e.Data, true);
             };
 
+            ProcessJob processJob = null;
+            ContainedStageLaunch containedLaunch = null;
             try
             {
+                containedLaunch = ContainedStageLaunch.Prepare(psi);
+                processJob = ProcessJob.CreateArmed();
                 lock (processLock)
                 {
-                    runningProcess = process;
+                    ThrowIfCancellationRequested();
                     process.Start();
+                    processJob.AssignOrTerminate(process);
+                    runningProcess = process;
+                    runningProcessJob = processJob;
+                    containedLaunch.Release();
                 }
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
             }
             catch (Exception ex)
             {
-                lock (processLock) { runningProcess = null; }
+                lock (processLock)
+                {
+                    if (ReferenceEquals(runningProcess, process)) runningProcess = null;
+                    if (ReferenceEquals(runningProcessJob, processJob)) runningProcessJob = null;
+                }
+                if (processJob != null) processJob.Dispose();
+                if (containedLaunch != null) containedLaunch.Dispose();
+                process.Dispose();
                 if (!config.PreviewOnly)
                     WriteLauncherRecord(config, -1, "failed_to_start: " + ex.Message);
                 DeleteTemporaryPanelMap(config);
@@ -1778,7 +2322,12 @@ namespace IFQuantLauncher
                     {
                         if (ReferenceEquals(runningProcess, process))
                             runningProcess = null;
+                        if (ReferenceEquals(runningProcessJob, processJob))
+                            runningProcessJob = null;
                     }
+                    processJob.Dispose();
+                    containedLaunch.Dispose();
+                    process.Dispose();
                 }
 
                 BeginInvoke(new Action(delegate
@@ -1881,10 +2430,9 @@ namespace IFQuantLauncher
                 string stage1Root = wsiOutputBox.Text.Trim();
                 if (stage1Root.Length == 0)
                     throw new InvalidOperationException(
-                        "Choose the stage 1 output root. The tiles measured in stage 2 are read " +
-                        "from its tiles\\ subfolder.");
-                input = Path.Combine(Path.GetFullPath(stage1Root), "tiles");
-                Directory.CreateDirectory(input);
+                        "Choose a fresh Stage 1 output root. Stage 1 creates one declared " +
+                        "slide subfolder per .vsi file beneath it.");
+                input = Path.GetFullPath(stage1Root);
             }
             else
             {
@@ -1900,9 +2448,12 @@ namespace IFQuantLauncher
                     "Could not find a Fiji/ImageJ executable. Select the executable itself or its installation folder.");
 
             string outputBase = outputBaseBox.Text.Trim();
-            if (outputBase.Length == 0)
-                throw new InvalidOperationException("Choose an output parent folder.");
-            Directory.CreateDirectory(outputBase);
+            if (SelectedRoute != ImageRoute.IfSlideScanner)
+            {
+                if (outputBase.Length == 0)
+                    throw new InvalidOperationException("Choose an output parent folder.");
+                Directory.CreateDirectory(outputBase);
+            }
 
             string includeRegex = includeRegexBox.Text.Trim();
             if (includeRegex.Length == 0)
@@ -1958,7 +2509,9 @@ namespace IFQuantLauncher
 
             RuntimePaths runtime = RuntimeBundle.EnsureExtracted();
             string autoPanelMapPath = autoDetection == null ? null :
-                WriteAutoPanelMap(autoDetection, runtime.RuntimeDirectory);
+                WriteAutoPanelMap(
+                    autoDetection,
+                    Path.Combine(Path.GetTempPath(), "IFQuantLauncher"));
 
             // ---------------------------------------------------------
             // v1.8.0: the fail-closed gate runs BEFORE anything is created
@@ -1969,6 +2522,8 @@ namespace IFQuantLauncher
             request.Route = route;
             request.PanelKey = panelKey;          // AUTO already resolved above
             request.PreviewOnly = previewOnly;
+            if (route == ImageRoute.IfSlideScanner)
+                request.WsiOutput = input;
             GateResult gate = EvaluateGate(request);
             if (gate.Blocked)
             {
@@ -1978,6 +2533,14 @@ namespace IFQuantLauncher
                 throw new InvalidOperationException(
                     "This run was refused before anything was created:\r\n\r\n" +
                     string.Join("\r\n\r\n", reasons.ToArray()));
+            }
+
+            if (route == ImageRoute.IfSlideScanner)
+            {
+                if (File.Exists(input))
+                    throw new InvalidOperationException(
+                        "The Stage 1 output root names an existing file: " + input);
+                PreStartAssertions.AssertOutputDirectoryEmpty(input);
             }
 
             string runStem = SanitizeFileName(runNameBox.Text.Trim());
@@ -1990,7 +2553,9 @@ namespace IFQuantLauncher
             foreach (string stamp in gate.FolderStamps())
                 runStem += stamp;
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-            string outputDirectory = MakeUniqueDirectory(Path.Combine(outputBase, runStem + "_" + timestamp));
+            string outputDirectory = route == ImageRoute.IfSlideScanner
+                ? input
+                : MakeUniqueDirectory(Path.Combine(outputBase, runStem + "_" + timestamp));
 
             Dictionary<string, string> env;
             string invocationDescription;
@@ -2014,7 +2579,7 @@ namespace IFQuantLauncher
                     previewOnly, ChoiceKey(tissueModeBox), ChoiceKey(compartmentModeBox),
                     ChoiceKey(wholeCompartmentBox));
                 foreach (KeyValuePair<string, string> item in
-                         ParseAdvancedEnvironment(advancedBox.Text))
+                         ParseAdvancedEnvironment(advancedBox.Text, true))
                     env[item.Key] = item.Value;
 
                 fijiArguments = LegacyProfile.CommandLine(runtime.ScriptPath);
@@ -2036,7 +2601,8 @@ namespace IFQuantLauncher
                 // holds the key this request will run under.
                 env = RunEnvironment.BuildStage2(
                     request, PanelForRequest(request), engineThresholdMarkers,
-                    runtime.RegistryPath, outputDirectory, input, autoPanelMapPath,
+                    runtime.RegistryPath, runtime.ScriptPath,
+                    outputDirectory, input, autoPanelMapPath,
                     previewOnly);
 
                 if (request.Invocation == FijiInvocation.BundledJvm)
@@ -2054,6 +2620,15 @@ namespace IFQuantLauncher
                     invocationDescription =
                         "launcher_exe: " + Path.GetFileName(fiji) + " " + fijiArguments;
                 }
+
+                if (route == ImageRoute.IfSlideScanner)
+                {
+                    // The content-addressed runtime is immutable and its tree
+                    // is exact. Prevent Python (including the index builder
+                    // launched by PowerShell) from adding __pycache__ files.
+                    env["PYTHONDONTWRITEBYTECODE"] = "1";
+                    env["PYTHONNOUSERSITE"] = "1";
+                }
             }
 
             RunConfiguration config = new RunConfiguration();
@@ -2061,6 +2636,7 @@ namespace IFQuantLauncher
             config.OutputDirectory = outputDirectory;
             config.FijiExecutable = fiji;
             config.RuntimeDirectory = runtime.RuntimeDirectory;
+            config.RuntimeBundleSha256 = runtime.BundleSha256;
             config.ScriptPath = runtime.ScriptPath;
             config.RegistryPath = runtime.RegistryPath;
             config.Environment = env;
@@ -2080,20 +2656,34 @@ namespace IFQuantLauncher
                 ToolInventory tools = ResolveTools(request);
                 config.QuPathExecutable = tools.QuPathExecutable;
                 config.PythonExecutable = tools.PythonExecutable;
+                config.PowerShellExecutable = tools.PowerShellExecutable;
+                config.FijiDirectory = tools.FijiDirectory;
                 config.Stage1ScriptPath = runtime.Stage1ScriptPath;
+                config.Stage2OrchestratorPath = runtime.Stage2OrchestratorPath;
+                config.Stage2IndexBuilderPath = runtime.Stage2IndexBuilderPath;
                 config.Stage3ScriptPath = runtime.Stage3ScriptPath;
-                config.Stage1Environment = RunEnvironment.BuildStage1(request, panelKey);
+                config.Stage4ScriptPath = runtime.MouseAggregatorPath;
+                config.ReferenceMaskProfilePath = request.WsiReferenceMaskProfile;
+                config.Stage1Environment = RunEnvironment.BuildStage1(
+                    request, panelKey, runtime.Stage1ScriptPath);
+                config.InvocationDescription =
+                    "powershell_sharded: " + Path.GetFileName(config.PowerShellExecutable) +
+                    " -File " + Path.GetFileName(config.Stage2OrchestratorPath) +
+                    " -UseInheritedIfqConfig (4 shards per declared slide)";
             }
 
             // -------------------------------------------------------------
             // THE LAUNCH CHOKE POINT.
             //
-            // Every process this run will start gets a seal here, and nothing
-            // downstream can start a process without one: EnvironmentApply.Apply
-            // takes a RunSeal and RunSeal's constructor is private. The seal
-            // re-derives, from the FINAL merged environment, which channels are
-            // genuinely frozen, and throws if that disagrees with the record
-            // this run is about to write.
+            // Every UI-selected analysis stage gets a seal here before it may
+            // be handed to the Job-contained launch wrapper.
+            // EnvironmentApply.Apply takes a RunSeal and RunSeal's constructor
+            // is private. The hidden contained-stage helper is deliberately a
+            // transport wrapper, not another configuration path: it inherits
+            // the already sealed ProcessStartInfo environment byte-for-byte.
+            // The seal re-derives, from the FINAL merged environment, which
+            // channels are genuinely frozen, and throws if that disagrees with
+            // the record this run is about to write.
             //
             // H1/H3/H4 moved inside it, so they too are checked against the
             // environment that will actually be handed to the process rather
@@ -2103,7 +2693,8 @@ namespace IFQuantLauncher
             // v1.7.2's Advanced box was the only way to set the nuclei floor.
             // -------------------------------------------------------------
             List<string> advancedKeys =
-                new List<string>(ParseAdvancedEnvironment(advancedBox.Text).Keys);
+                new List<string>(ParseAdvancedEnvironment(
+                    advancedBox.Text, route == ImageRoute.LegacyFiji172).Keys);
             PanelDef sealPanel = PanelForRequest(request);
 
             SealInput stage2 = new SealInput();
@@ -2113,6 +2704,10 @@ namespace IFQuantLauncher
             stage2.EngineThresholdMarkers = engineThresholdMarkers;
             stage2.Gate = gate;
             stage2.Environment = env;
+            stage2.ExpectedEngineScriptPath = runtime.ScriptPath;
+            stage2.ExpectedStarDistModelPath = request.StarDistModelPath;
+            stage2.ExpectedStarDistRuntimeManifestPath =
+                request.StarDistRuntimeManifestPath;
             stage2.OutputDirectory = outputDirectory;
             stage2.AdvancedKeys = advancedKeys;
             config.Stage2Seal = RunSeal.Issue(stage2);
@@ -2126,23 +2721,38 @@ namespace IFQuantLauncher
                 stage1.EngineThresholdMarkers = engineThresholdMarkers;
                 stage1.Gate = gate;
                 stage1.Environment = config.Stage1Environment;
+                stage1.ExpectedStage1ScriptPath = runtime.Stage1ScriptPath;
+                stage1.ExpectedReferenceMaskProfilePath =
+                    config.ReferenceMaskProfilePath;
                 stage1.OutputDirectory = null;   // stage 1 writes its own root
                 stage1.AdvancedKeys = advancedKeys;
                 config.Stage1Seal = RunSeal.Issue(stage1);
 
-                // Stage 3 reads no IFQ_* at all. It still gets a seal, because
-                // "this stage needs no environment" is a claim worth checking
-                // once rather than a reason to skip the choke point.
+                // Stages 3 and 4 read no IFQ_* at all. They still get separate
+                // seals because every process start must cross the choke point.
+                Dictionary<string, string> pythonEnvironment =
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                pythonEnvironment["PYTHONDONTWRITEBYTECODE"] = "1";
+                pythonEnvironment["PYTHONNOUSERSITE"] = "1";
                 SealInput stage3 = new SealInput();
                 stage3.Stage = LaunchStage.Stage3Python;
                 stage3.Request = request;
                 stage3.Panel = sealPanel;
                 stage3.EngineThresholdMarkers = engineThresholdMarkers;
                 stage3.Gate = gate;
-                stage3.Environment = new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase);
+                stage3.Environment = pythonEnvironment;
                 stage3.AdvancedKeys = advancedKeys;
                 config.Stage3Seal = RunSeal.Issue(stage3);
+
+                SealInput stage4 = new SealInput();
+                stage4.Stage = LaunchStage.Stage4Python;
+                stage4.Request = request;
+                stage4.Panel = sealPanel;
+                stage4.EngineThresholdMarkers = engineThresholdMarkers;
+                stage4.Gate = gate;
+                stage4.Environment = pythonEnvironment;
+                stage4.AdvancedKeys = advancedKeys;
+                config.Stage4Seal = RunSeal.Issue(stage4);
             }
             return config;
         }
@@ -2154,7 +2764,8 @@ namespace IFQuantLauncher
             return "true";
         }
 
-        private static Dictionary<string, string> ParseAdvancedEnvironment(string text)
+        private static Dictionary<string, string> ParseAdvancedEnvironment(
+            string text, bool legacyMode = false)
         {
             Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string[] lines = (text ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
@@ -2172,7 +2783,8 @@ namespace IFQuantLauncher
                 if (!Regex.IsMatch(key, @"^IFQ_[A-Z0-9_]+$"))
                     throw new InvalidOperationException(
                         "Advanced setting line " + (index + 1) + " has an invalid IFQ key: " + key);
-                if (ProtectedEnvironmentKeys.Contains(key))
+                if (ProtectedEnvironmentKeys.Contains(key) &&
+                    (!legacyMode || LegacyProfile.ProtectedKeys.Contains(key)))
                     throw new InvalidOperationException(
                         key + " is controlled by the launcher interface and cannot be overridden in Advanced settings.");
                 if (value.Length == 0)
@@ -2187,8 +2799,11 @@ namespace IFQuantLauncher
         // a second way into a child process's environment, which is precisely
         // the shape of both defect rounds, so the shim is gone: everything now
         // goes through EnvironmentApply.Apply, which takes a RunSeal. The
-        // stripping itself still lives in EnvironmentApply.ClearIfq, which the
-        // legacy equivalence harness executes directly.
+        // contained-stage transport helper receives that already sealed
+        // environment and never constructs or overlays an IFQ environment of
+        // its own. The stripping itself still lives in
+        // EnvironmentApply.ClearIfq, which the legacy equivalence harness
+        // executes directly.
 
         private void HandleFijiLine(string line, bool isError)
         {
@@ -2297,6 +2912,7 @@ namespace IFQuantLauncher
         private void FinishDisplayPreview(RunConfiguration config, int exitCode, string waitError)
         {
             SetRunningState(false);
+            bool cancellation = CancellationWasRequested;
             string[] allFiles = Directory.Exists(config.OutputDirectory)
                 ? Directory.GetFiles(config.OutputDirectory, "*", SearchOption.AllDirectories)
                 : new string[0];
@@ -2333,10 +2949,10 @@ namespace IFQuantLauncher
             lastSummaryPath = null;
             openSummaryButton.Enabled = false;
             openOutputButton.Enabled = Directory.Exists(config.OutputDirectory);
-            bool complete = exitCode == 0 && waitError == null &&
+            bool complete = !cancellation && exitCode == 0 && waitError == null &&
                             mergedCount > 0 &&
                             unexpectedFiles.Length == 0;
-            if (cancellationRequested)
+            if (cancellation)
             {
                 SetProgressTerminal(
                     "Visual merge panel generation was cancelled. Any PNGs already written remain available for inspection.",
@@ -2369,6 +2985,7 @@ namespace IFQuantLauncher
         private void FinishAnalysis(RunConfiguration config, int exitCode, string waitError)
         {
             SetRunningState(false);
+            bool cancellation = CancellationWasRequested;
             string manifestPath = Path.Combine(config.OutputDirectory, "run_manifest.json");
             string summaryCsvPath = Path.Combine(config.OutputDirectory, "run_summary.csv");
             string summaryWorkbookPath = Path.Combine(config.OutputDirectory, "run_summary.xlsx");
@@ -2398,7 +3015,8 @@ namespace IFQuantLauncher
                 }
             }
 
-            WriteLauncherRecord(config, exitCode, manifestStatus);
+            WriteLauncherRecord(
+                config, exitCode, cancellation ? "cancelled" : manifestStatus);
             AppendLog("");
             AppendLog("Fiji exit code: " + exitCode);
             AppendLog("Manifest status: " + manifestStatus);
@@ -2410,17 +3028,19 @@ namespace IFQuantLauncher
             if (waitError != null)
                 AppendLog("Process wait error: " + waitError);
 
-            lastSummaryPath = File.Exists(summaryWorkbookPath)
-                ? summaryWorkbookPath
-                : (File.Exists(summaryCsvPath) ? summaryCsvPath : null);
+            lastSummaryPath = cancellation
+                ? null
+                : (File.Exists(summaryWorkbookPath)
+                    ? summaryWorkbookPath
+                    : (File.Exists(summaryCsvPath) ? summaryCsvPath : null));
             openSummaryButton.Enabled = lastSummaryPath != null;
             openOutputButton.Enabled = Directory.Exists(config.OutputDirectory);
 
-            bool complete = exitCode == 0 &&
+            bool complete = !cancellation && exitCode == 0 &&
                 string.Equals(manifestStatus, "complete", StringComparison.OrdinalIgnoreCase) &&
                 File.Exists(summaryCsvPath) &&
                 File.Exists(summaryWorkbookPath);
-            if (cancellationRequested)
+            if (cancellation)
             {
                 SetProgressTerminal(
                     "Analysis was cancelled. Partial outputs are retained only for troubleshooting and must not be aggregated.",
@@ -2459,6 +3079,7 @@ namespace IFQuantLauncher
 
         private void SetRunningState(bool running)
         {
+            Interlocked.Exchange(ref runActive, running ? 1 : 0);
             runButton.Enabled = !running;
             previewButton.Enabled = !running;
             cancelButton.Enabled = running;
@@ -2469,16 +3090,23 @@ namespace IFQuantLauncher
                     : "Running Fiji analysis...";
                 statusLabel.ForeColor = Color.DarkBlue;
             }
+            else if (Interlocked.Exchange(ref closeAfterCancellation, 0) != 0)
+            {
+                // The finish method still has record/temporary-file cleanup
+                // after this call. Queue Close so that cleanup completes first.
+                BeginInvoke(new Action(delegate
+                {
+                    if (IsDisposed) return;
+                    bypassClosePrompt = true;
+                    Close();
+                }));
+            }
         }
 
         private void CancelRunningProcess()
         {
-            Process process = null;
-            lock (processLock)
-            {
-                process = runningProcess;
-            }
-            if (process == null)
+            if (Interlocked.CompareExchange(
+                    ref cancellationTerminationConfirmed, 0, 0) != 0)
                 return;
 
             DialogResult result = MessageBox.Show(
@@ -2492,33 +3120,87 @@ namespace IFQuantLauncher
             if (result != DialogResult.Yes)
                 return;
 
-            cancellationRequested = true;
+            string failure;
+            if (!RequestCancellationAndTerminate(out failure))
+            {
+                MessageBox.Show(
+                    this,
+                    "The process tree could not be confirmed terminated. The launcher will " +
+                    "remain open so cancellation can be retried.\r\n\r\n" + failure,
+                    "Cancellation incomplete",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private bool CancellationWasRequested
+        {
+            get { return Interlocked.CompareExchange(ref cancellationRequested, 0, 0) != 0; }
+        }
+
+        private void ThrowIfCancellationRequested()
+        {
+            if (CancellationWasRequested)
+                throw new OperationCanceledException(
+                    "Cancellation was requested; no later analysis stage was started.");
+        }
+
+        private bool RequestCancellationAndTerminate(out string failure)
+        {
+            failure = null;
+            // Route 2 deliberately has gaps where no child is alive. Latch
+            // independently of runningProcess so those clicks cannot be lost.
+            Interlocked.Exchange(ref cancellationRequested, 1);
             progressBar.MarqueeAnimationSpeed = 22;
             progressBar.Style = ProgressBarStyle.Marquee;
-            statusLabel.Text = "Cancelling — terminating Fiji";
+            statusLabel.Text = "Cancelling - terminating the process tree";
             statusLabel.ForeColor = Color.DarkOrange;
-            progressDetailLabel.Text = "Please wait while the Fiji process and its child processes close.";
+            progressDetailLabel.Text =
+                "Please wait while the current stage and all descendants terminate.";
+
+            Process process;
+            ProcessJob job;
+            lock (processLock)
+            {
+                process = runningProcess;
+                job = runningProcessJob;
+            }
+
+            if (process == null)
+            {
+                AppendLog(
+                    "Cancellation latched between stages; no later stage will be started.");
+                Interlocked.Exchange(ref cancellationTerminationConfirmed, 1);
+                cancelButton.Enabled = false;
+                return true;
+            }
+            if (job == null)
+            {
+                failure =
+                    "The active process has no containment Job Object. Its descendants cannot " +
+                    "be proven terminated.";
+                AppendLog("Cancellation error: " + failure);
+                return false;
+            }
 
             try
             {
-                if (!process.HasExited)
+                if (!job.TerminateAndWait(process, 15000, out failure))
                 {
-                    ProcessStartInfo taskKill = new ProcessStartInfo();
-                    taskKill.FileName = "taskkill.exe";
-                    taskKill.Arguments = "/PID " + process.Id + " /T /F";
-                    taskKill.UseShellExecute = false;
-                    taskKill.CreateNoWindow = true;
-                    using (Process killer = Process.Start(taskKill))
-                    {
-                        killer.WaitForExit(10000);
-                    }
+                    AppendLog("Cancellation error: " + failure);
+                    return false;
                 }
-                AppendLog("Cancellation requested.");
+                AppendLog(
+                    "Cancellation confirmed: the active Job Object reports zero processes.");
+                Interlocked.Exchange(ref cancellationTerminationConfirmed, 1);
+                cancelButton.Enabled = false;
+                return true;
             }
             catch (Exception ex)
             {
-                AppendLog("Cancellation error: " + ex.Message);
-                try { if (!process.HasExited) process.Kill(); } catch { }
+                failure = ex.Message;
+                AppendLog("Cancellation error: " + failure);
+                return false;
             }
         }
 
@@ -2554,6 +3236,27 @@ namespace IFQuantLauncher
                     config.InvocationDescription, exitCode, status,
                     ComputeSha256(config.ScriptPath), ComputeSha256(config.RegistryPath),
                     config.LegacyArtefactNote);
+                StringBuilder provenance = new StringBuilder(record);
+                provenance.AppendLine();
+                provenance.AppendLine("[runtime_bundle]");
+                provenance.AppendLine(
+                    "bundle_sha256=" + (config.RuntimeBundleSha256 ?? ""));
+                provenance.AppendLine(
+                    "stage2_script_sha256=" + ComputeSha256(config.ScriptPath));
+                if (!string.IsNullOrEmpty(config.Stage1ScriptPath))
+                    provenance.AppendLine(
+                        "stage1_script_sha256=" + ComputeSha256(config.Stage1ScriptPath));
+                if (!string.IsNullOrEmpty(config.Stage2IndexBuilderPath))
+                    provenance.AppendLine(
+                        "stage2_index_builder_sha256=" +
+                        ComputeSha256(config.Stage2IndexBuilderPath));
+                if (!string.IsNullOrEmpty(config.Stage3ScriptPath))
+                    provenance.AppendLine(
+                        "stage3_script_sha256=" + ComputeSha256(config.Stage3ScriptPath));
+                if (!string.IsNullOrEmpty(config.Stage4ScriptPath))
+                    provenance.AppendLine(
+                        "stage4_script_sha256=" + ComputeSha256(config.Stage4ScriptPath));
+                record = provenance.ToString();
                 if (config.Stage1Environment != null)
                 {
                     StringBuilder stage1 = new StringBuilder(record);
@@ -2686,9 +3389,9 @@ namespace IFQuantLauncher
             return architecture;
         }
 
-        private static string QuoteArgument(string value)
+        internal static string QuoteArgument(string value)
         {
-            return "\"" + value.Replace("\"", "\\\"") + "\"";
+            return WindowsCommandLine.Quote(value);
         }
 
         private static string SanitizeFileName(string value)
@@ -2762,6 +3465,9 @@ namespace IFQuantLauncher
                 settings["run_name"] = runNameBox.Text;
                 settings["panel"] = ChoiceKey(panelBox);
                 settings["segmenter"] = ChoiceKey(segmenterBox);
+                settings["stardist_model_path"] = starDistModelPathBox.Text;
+                settings["stardist_runtime_manifest"] =
+                    starDistRuntimeManifestBox.Text;
                 settings["projection"] = ChoiceKey(projectionBox);
                 settings["single_plane"] = singlePlaneBox.Value.ToString(CultureInfo.InvariantCulture);
                 settings["tissue"] = ChoiceKey(tissueModeBox);
@@ -2771,6 +3477,7 @@ namespace IFQuantLauncher
                 settings["include_regex_b64"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(includeRegexBox.Text));
                 settings["max_images"] = maxImagesBox.Value.ToString(CultureInfo.InvariantCulture);
                 settings["panel_config"] = panelConfigBox.Text;
+                settings["wsi_reference_mask_profile"] = referenceMaskProfileBox.Text;
                 settings["advanced_b64"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(advancedBox.Text));
 
                 StringBuilder content = new StringBuilder();
@@ -2803,6 +3510,10 @@ namespace IFQuantLauncher
                 runNameBox.Text = GetValue(values, "run_name", runNameBox.Text);
                 SelectChoice(panelBox, GetValue(values, "panel", "AUTO"));
                 SelectChoice(segmenterBox, GetValue(values, "segmenter", "classic"));
+                starDistModelPathBox.Text = GetValue(
+                    values, "stardist_model_path", "");
+                starDistRuntimeManifestBox.Text = GetValue(
+                    values, "stardist_runtime_manifest", "");
                 SelectChoice(projectionBox, GetValue(values, "projection", "layer_aware"));
                 SetNumeric(singlePlaneBox, GetValue(values, "single_plane", "-1"));
                 SelectChoice(tissueModeBox, GetValue(values, "tissue", "auto"));
@@ -2812,6 +3523,8 @@ namespace IFQuantLauncher
                 includeRegexBox.Text = DecodeBase64(GetValue(values, "include_regex_b64", ""), ".*");
                 SetNumeric(maxImagesBox, GetValue(values, "max_images", "0"));
                 panelConfigBox.Text = GetValue(values, "panel_config", "");
+                referenceMaskProfileBox.Text = GetValue(
+                    values, "wsi_reference_mask_profile", "");
                 advancedBox.Text = DecodeBase64(GetValue(values, "advanced_b64", ""), "");
             }
             catch
@@ -2880,12 +3593,148 @@ namespace IFQuantLauncher
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
+    internal sealed class Stage1SlideLayout
+    {
+        public string SlideStem;
+        public string SlideDirectory;
+        public string TilesDirectory;
+        public string Stage2IndexPath;
+    }
+
+    /// <summary>
+    /// Resolves only slide directories declared by Stage 1. Paths recorded in
+    /// JSON are deliberately ignored: slide_stem is treated as an untrusted
+    /// direct-child name and every downstream path is rebuilt beneath the
+    /// selected fresh WSI root.
+    /// </summary>
+    internal static class Stage1LayoutDiscovery
+    {
+        public static List<Stage1SlideLayout> Discover(string stage1Root)
+        {
+            if (string.IsNullOrWhiteSpace(stage1Root))
+                throw new InvalidOperationException("Stage 1 output root is empty.");
+            string root = NormalizeDirectoryPath(stage1Root);
+            if (!Directory.Exists(root))
+                throw new InvalidOperationException(
+                    "Stage 1 did not create its output root: " + root);
+            string manifestPath = Path.Combine(root, "stage1_manifest.json");
+            if (!File.Exists(manifestPath))
+                throw new InvalidOperationException(
+                    "Stage 1 exited 0 but wrote no stage1_manifest.json at " + manifestPath + ".");
+
+            Dictionary<string, object> document;
+            try
+            {
+                JavaScriptSerializer json = new JavaScriptSerializer();
+                document = json.Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(manifestPath, Encoding.UTF8));
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Stage 1 manifest is not valid JSON: " + ex.Message, ex);
+            }
+
+            object slidesObject;
+            System.Collections.IEnumerable slides = null;
+            if (document != null && document.TryGetValue("slides", out slidesObject) &&
+                !(slidesObject is string))
+                slides = slidesObject as System.Collections.IEnumerable;
+            if (slides == null)
+                throw new InvalidOperationException(
+                    "Stage 1 manifest must contain a slides array.");
+
+            List<Stage1SlideLayout> layouts = new List<Stage1SlideLayout>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (object item in slides)
+            {
+                Dictionary<string, object> slide = item as Dictionary<string, object>;
+                object stemObject;
+                string stem = slide != null && slide.TryGetValue("slide_stem", out stemObject)
+                    ? Convert.ToString(stemObject, CultureInfo.InvariantCulture)
+                    : "";
+                if (!IsSafeDirectChildName(stem))
+                    throw new InvalidOperationException(
+                        "Stage 1 manifest contains an unsafe slide_stem: '" + stem + "'.");
+                if (!seen.Add(stem))
+                    throw new InvalidOperationException(
+                        "Stage 1 manifest declares slide_stem more than once (case-insensitive): " +
+                        stem);
+
+                string slideDirectory = Path.GetFullPath(Path.Combine(root, stem));
+                string parent = Path.GetDirectoryName(slideDirectory);
+                if (!string.Equals(parent, root, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "Stage 1 slide directory escapes the selected output root: " + stem);
+                string tiles = Path.Combine(slideDirectory, "tiles");
+                RequireDirectory(slideDirectory, "Stage 1 slide directory");
+                RequireDirectory(tiles, "Stage 1 tiles directory");
+                RequireFile(Path.Combine(tiles, "samplesheet.csv"), "Stage 1 samplesheet");
+                RequireFile(Path.Combine(slideDirectory, "tile_manifest.csv"),
+                            "Stage 1 tile manifest");
+                RequireFile(Path.Combine(slideDirectory, "tile_candidate_manifest.csv"),
+                            "Stage 1 tile-candidate manifest");
+
+                Stage1SlideLayout layout = new Stage1SlideLayout();
+                layout.SlideStem = stem;
+                layout.SlideDirectory = slideDirectory;
+                layout.TilesDirectory = tiles;
+                layout.Stage2IndexPath = Path.Combine(
+                    slideDirectory, "stage2_run_index.json");
+                layouts.Add(layout);
+            }
+            if (layouts.Count == 0)
+                throw new InvalidOperationException(
+                    "Stage 1 manifest declares no slides; Stage 2 was not started.");
+            layouts.Sort(delegate(Stage1SlideLayout a, Stage1SlideLayout b)
+            {
+                return StringComparer.Ordinal.Compare(a.SlideStem, b.SlideStem);
+            });
+            return layouts;
+        }
+
+        private static bool IsSafeDirectChildName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value == "." || value == ".." ||
+                !string.Equals(value, value.Trim(), StringComparison.Ordinal) ||
+                Path.IsPathRooted(value) || value.IndexOf(Path.DirectorySeparatorChar) >= 0 ||
+                value.IndexOf(Path.AltDirectorySeparatorChar) >= 0 ||
+                value.IndexOf(':') >= 0 || !string.Equals(Path.GetFileName(value), value,
+                    StringComparison.Ordinal))
+                return false;
+            return value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+        }
+
+        private static string NormalizeDirectoryPath(string value)
+        {
+            string full = Path.GetFullPath(value);
+            string volumeRoot = Path.GetPathRoot(full);
+            if (!string.Equals(full, volumeRoot, StringComparison.OrdinalIgnoreCase))
+                full = full.TrimEnd(Path.DirectorySeparatorChar,
+                                    Path.AltDirectorySeparatorChar);
+            return full;
+        }
+
+        private static void RequireDirectory(string path, string label)
+        {
+            if (!Directory.Exists(path))
+                throw new InvalidOperationException(label + " is missing: " + path);
+        }
+
+        private static void RequireFile(string path, string label)
+        {
+            if (!File.Exists(path))
+                throw new InvalidOperationException(label + " is missing: " + path);
+        }
+    }
+
     internal sealed class RunConfiguration
     {
         public string InputDirectory;
         public string OutputDirectory;
         public string FijiExecutable;
         public string RuntimeDirectory;
+        public string RuntimeBundleSha256;
         public string ScriptPath;
         public string RegistryPath;
         public bool PanelWasAutoDetected;
@@ -2906,21 +3755,28 @@ namespace IFQuantLauncher
         // Route 2 only
         public string QuPathExecutable;
         public string PythonExecutable;
+        public string PowerShellExecutable;
+        public string FijiDirectory;
         public string Stage1ScriptPath;
+        public string Stage2OrchestratorPath;
+        public string Stage2IndexBuilderPath;
         public string Stage3ScriptPath;
+        public string Stage4ScriptPath;
+        public string ReferenceMaskProfilePath;
         public Dictionary<string, string> Stage1Environment;
 
         // ---- the launch choke point ----
         //
-        // One seal per process this run will start. A seal is the ONLY thing
-        // EnvironmentApply.Apply accepts, and RunSeal's constructor is private,
-        // so a stage that has no seal here simply cannot be started. That is
-        // deliberate: the previous two defect rounds were both a caller reaching
-        // the child environment without passing validation, and adding a field
-        // to this class is not enough to do that any more.
+        // One seal per analysis stage this run can select. A seal is the ONLY
+        // thing EnvironmentApply.Apply accepts, and RunSeal's constructor is
+        // private, so a configured stage that has no seal here cannot be
+        // started. The contained-stage helper is only a Job-gating transport
+        // for a ProcessStartInfo whose environment has already crossed this
+        // boundary; it does not write an environment itself.
         public RunSeal Stage1Seal;
         public RunSeal Stage2Seal;
         public RunSeal Stage3Seal;
+        public RunSeal Stage4Seal;
     }
 
     internal sealed class RuntimePaths
@@ -2929,56 +3785,594 @@ namespace IFQuantLauncher
         public string ScriptPath;
         public string RegistryPath;
         public string Stage1ScriptPath;
+        public string Stage2OrchestratorPath;
+        public string Stage2IndexBuilderPath;
         public string Stage3ScriptPath;
+        public string MouseAggregatorPath;
         public string PipelineSha256;
         public string RegistrySha256;
+        public string BundleSha256;
     }
 
     internal static class RuntimeBundle
     {
         private const string ScriptResource = "IFQuant.IF_Quant_Pipeline.groovy";
         private const string RegistryResource = "IFQuant.lung_marker_registry.json";
-        // v1.8.0: route 2 needs stage 1 and stage 3 on an analysis machine that
-        // has no repository checkout, for the same reason v1.7.2 embedded the
-        // pipeline. Both are optional at run time so a Fiji-only build of this
-        // launcher still starts.
+        // Route 2 needs the entire authoritative runtime tree on an analysis
+        // machine that has no repository checkout. Every resource below is a
+        // build requirement and extraction fails closed if one is absent.
         private const string Stage1Resource = "IFQuant.qupath_wsi_tile_export.groovy";
         private const string Stage3Resource = "IFQuant.aggregate_tiles_to_slide.py";
+        private const string MouseAggregatorResource = "IFQuant.aggregate_to_mouse.py";
+        private const string Stage2OrchestratorResource = "IFQuant.Invoke-Stage2Sharded.ps1";
+        private const string Stage2IndexBuilderResource = "IFQuant.build_stage2_run_index.py";
+        private const string PackageInitResource = "IFQuant.ifquant.__init__.py";
+        private const string PackageAdaptersResource = "IFQuant.ifquant.adapters.py";
+        private const string PackageContractsResource = "IFQuant.ifquant.contracts.py";
+        private const string PackageRouteRecordsResource =
+            "IFQuant.ifquant.route_records.py";
+        private const string PackageStage2IndexResource = "IFQuant.ifquant.stage2_index.py";
+        private const string Stage2SchemaResource = "IFQuant.stage2-run-index.schema.json";
+        private const string MeasurementSchemaResource = "IFQuant.measurement-record.schema.json";
+        private const string WsiReferenceMaskSchemaResource =
+            "IFQuant.wsi-reference-mask-profile.schema.json";
+        private const string StarDistRuntimeSchemaResource =
+            "IFQuant.stardist-runtime-manifest.schema.json";
+
+        // Increment only if the publication/validation format changes. The
+        // resource bytes are the remaining identity, so two different builds
+        // carrying version 1.9.7 can never share a mixed runtime directory.
+        private const string RuntimeFormat = "ifquant-runtime-v2";
+        private const uint GenericRead = 0x80000000;
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileFlagSequentialScan = 0x08000000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName, uint desiredAccess, uint shareMode,
+            IntPtr securityAttributes, uint creationDisposition,
+            uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file, out ByHandleFileInformation information);
+
+        private sealed class RuntimeResource
+        {
+            public string ResourceName;
+            public string RelativePath;
+            public byte[] Bytes;
+            public string Sha256;
+        }
+
+        private static readonly object ExtractionLock = new object();
+        private static RuntimePaths cachedPaths;
+        // These handles are intentionally process-lifetime leases. Directory
+        // handles deny rename/delete of every owned path component; file
+        // streams allow reads only and deny write/delete through any hard link.
+        private static List<SafeFileHandle> runtimeDirectoryLeases;
+        private static List<FileStream> runtimeFileLeases;
 
         public static RuntimePaths EnsureExtracted()
         {
-            Version version = Assembly.GetExecutingAssembly().GetName().Version;
-            string root = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "IFQuantLauncher",
-                "runtime",
-                version.ToString());
-            string config = Path.Combine(root, "config");
-            Directory.CreateDirectory(config);
+            lock (ExtractionLock)
+            {
+                if (cachedPaths != null) return cachedPaths;
 
-            string script = Path.Combine(root, "IF_Quant_Pipeline.groovy");
-            string registry = Path.Combine(config, "lung_marker_registry.json");
-            ExtractResource(ScriptResource, script);
-            ExtractResource(RegistryResource, registry);
+                List<RuntimeResource> resources = LoadResources();
+                string bundleSha256 = ComputeBundleSha256(resources);
+                Version version = Assembly.GetExecutingAssembly().GetName().Version;
+                string localData = Path.GetFullPath(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+                List<SafeFileHandle> directoryLeases = new List<SafeFileHandle>();
+                List<FileStream> fileLeases = null;
+                try
+                {
+                    string launcherRoot = EnsureOwnedDirectory(
+                        localData, "IFQuantLauncher", directoryLeases);
+                    string runtimeRoot = EnsureOwnedDirectory(
+                        launcherRoot, "runtime", directoryLeases);
+                    string finalName = version + "-" + bundleSha256;
+                    string root = Path.Combine(runtimeRoot, finalName);
 
-            string stage1 = Path.Combine(root, "qupath_wsi_tile_export.groovy");
-            string stage3 = Path.Combine(root, "aggregate_tiles_to_slide.py");
-            if (!TryExtractResource(Stage1Resource, stage1)) stage1 = null;
-            if (!TryExtractResource(Stage3Resource, stage3)) stage3 = null;
+                    bool mutexHeld = false;
+                    using (Mutex publisher = new Mutex(
+                               false, @"Local\IFQuantLauncher.Runtime." + bundleSha256))
+                    {
+                        try
+                        {
+                            try
+                            {
+                                publisher.WaitOne();
+                                mutexHeld = true;
+                            }
+                            catch (AbandonedMutexException)
+                            {
+                                mutexHeld = true;
+                            }
 
+                            if (File.Exists(root))
+                                throw new InvalidOperationException(
+                                    "The content-addressed runtime path is a file: " + root);
+                            if (!Directory.Exists(root))
+                                PublishAtomically(runtimeRoot, finalName, root, resources);
+
+                            fileLeases = AcquireRuntimeLease(
+                                root, resources, directoryLeases);
+                        }
+                        finally
+                        {
+                            if (mutexHeld) publisher.ReleaseMutex();
+                        }
+                    }
+
+                    RuntimePaths paths = BuildPaths(root, bundleSha256, resources);
+                    runtimeDirectoryLeases = directoryLeases;
+                    runtimeFileLeases = fileLeases;
+                    cachedPaths = paths;
+                    return cachedPaths;
+                }
+                catch
+                {
+                    if (fileLeases != null)
+                        foreach (FileStream stream in fileLeases) stream.Dispose();
+                    foreach (SafeFileHandle handle in directoryLeases) handle.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        private static List<RuntimeResource> LoadResources()
+        {
+            string[,] declarations = new string[,]
+            {
+                { ScriptResource, "IF_Quant_Pipeline.groovy" },
+                { RegistryResource, "config/lung_marker_registry.json" },
+                { Stage1Resource, "qupath_wsi_tile_export.groovy" },
+                { Stage3Resource, "aggregate_tiles_to_slide.py" },
+                { MouseAggregatorResource, "aggregate_to_mouse.py" },
+                { Stage2OrchestratorResource, "scripts/Invoke-Stage2Sharded.ps1" },
+                { Stage2IndexBuilderResource, "scripts/build_stage2_run_index.py" },
+                { PackageInitResource, "ifquant/__init__.py" },
+                { PackageAdaptersResource, "ifquant/adapters.py" },
+                { PackageContractsResource, "ifquant/contracts.py" },
+                { PackageRouteRecordsResource, "ifquant/route_records.py" },
+                { PackageStage2IndexResource, "ifquant/stage2_index.py" },
+                { Stage2SchemaResource, "schemas/stage2-run-index.schema.json" },
+                { MeasurementSchemaResource, "schemas/measurement-record.schema.json" },
+                { WsiReferenceMaskSchemaResource,
+                  "schemas/wsi-reference-mask-profile.schema.json" },
+                { StarDistRuntimeSchemaResource,
+                  "schemas/stardist-runtime-manifest.schema.json" }
+            };
+
+            Assembly assembly = Assembly.GetExecutingAssembly();
+            List<RuntimeResource> resources = new List<RuntimeResource>();
+            for (int index = 0; index < declarations.GetLength(0); index++)
+            {
+                string resourceName = declarations[index, 0];
+                byte[] bytes;
+                using (Stream input = assembly.GetManifestResourceStream(resourceName))
+                {
+                    if (input == null)
+                        throw new InvalidOperationException(
+                            "Embedded runtime resource is missing: " + resourceName);
+                    using (MemoryStream memory = new MemoryStream())
+                    {
+                        input.CopyTo(memory);
+                        bytes = memory.ToArray();
+                    }
+                }
+                RuntimeResource resource = new RuntimeResource();
+                resource.ResourceName = resourceName;
+                resource.RelativePath = declarations[index, 1];
+                resource.Bytes = bytes;
+                resource.Sha256 = ComputeSha256(bytes);
+                resources.Add(resource);
+            }
+            return resources;
+        }
+
+        private static string ComputeBundleSha256(List<RuntimeResource> resources)
+        {
+            using (MemoryStream canonical = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(canonical, new UTF8Encoding(false)))
+            {
+                writer.Write(RuntimeFormat);
+                writer.Write(resources.Count);
+                foreach (RuntimeResource resource in resources)
+                {
+                    writer.Write(resource.RelativePath.Replace('\\', '/'));
+                    writer.Write((long)resource.Bytes.Length);
+                    writer.Write(resource.Sha256);
+                }
+                writer.Flush();
+                return ComputeSha256(canonical.ToArray());
+            }
+        }
+
+        private static string EnsureOwnedDirectory(
+            string parent, string name, List<SafeFileHandle> leases)
+        {
+            if (name.IndexOfAny(new char[] { '\\', '/', ':' }) >= 0 ||
+                name == "." || name == "..")
+                throw new InvalidOperationException("Unsafe runtime directory name: " + name);
+            string path = Path.GetFullPath(Path.Combine(parent, name));
+            if (File.Exists(path))
+                throw new InvalidOperationException("Runtime directory path is a file: " + path);
+            Directory.CreateDirectory(path);
+            leases.Add(OpenDirectoryLease(path));
+            return path;
+        }
+
+        private static void PublishAtomically(
+            string runtimeRoot, string finalName, string finalPath,
+            List<RuntimeResource> resources)
+        {
+            string staging = Path.Combine(
+                runtimeRoot,
+                "." + finalName + "." +
+                Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + "." +
+                Guid.NewGuid().ToString("N") + ".tmp");
+            Directory.CreateDirectory(staging);
+            RejectReparsePoint(staging, "runtime staging directory");
+            try
+            {
+                HashSet<string> createdDirectories = new HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (RuntimeResource resource in resources)
+                {
+                    string destination = RuntimePath(staging, resource.RelativePath);
+                    string directory = Path.GetDirectoryName(destination);
+                    if (!createdDirectories.Contains(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                        RejectReparsePoint(directory, "runtime staging subdirectory");
+                        createdDirectories.Add(directory);
+                    }
+                    using (FileStream output = new FileStream(
+                               destination, FileMode.CreateNew, FileAccess.Write,
+                               FileShare.None, 65536, FileOptions.WriteThrough))
+                    {
+                        output.Write(resource.Bytes, 0, resource.Bytes.Length);
+                        output.Flush(true);
+                    }
+                }
+
+                ValidateRuntimeTree(staging, resources);
+                try
+                {
+                    Directory.Move(staging, finalPath);
+                }
+                catch (IOException)
+                {
+                    // Atomic same-parent rename chooses exactly one concurrent
+                    // publisher. A loser may use the winner only after the full
+                    // locked validation in AcquireRuntimeLease succeeds.
+                    if (!Directory.Exists(finalPath)) throw;
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(staging))
+                    TryDeleteOwnedStaging(staging, resources);
+            }
+        }
+
+        private static void TryDeleteOwnedStaging(
+            string staging, List<RuntimeResource> resources)
+        {
+            try
+            {
+                RejectReparsePoint(staging, "runtime staging directory");
+                foreach (RuntimeResource resource in resources)
+                {
+                    string file = RuntimePath(staging, resource.RelativePath);
+                    if (File.Exists(file) &&
+                        (File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0)
+                        File.Delete(file);
+                }
+                string[] knownDirectories = new string[]
+                {
+                    "config", "scripts", "ifquant", "schemas"
+                };
+                foreach (string name in knownDirectories)
+                {
+                    string directory = Path.Combine(staging, name);
+                    if (Directory.Exists(directory) &&
+                        (File.GetAttributes(directory) & FileAttributes.ReparsePoint) == 0)
+                        Directory.Delete(directory, false);
+                }
+                Directory.Delete(staging, false);
+            }
+            catch
+            {
+                // A suspicious or concurrently altered staging tree is safer
+                // left inert than recursively followed during cleanup.
+            }
+        }
+
+        private static List<FileStream> AcquireRuntimeLease(
+            string root, List<RuntimeResource> resources,
+            List<SafeFileHandle> directoryLeases)
+        {
+            List<string> directories = ExpectedDirectories(root, resources);
+            directories.Sort(delegate(string left, string right)
+            {
+                int length = left.Length.CompareTo(right.Length);
+                return length != 0 ? length :
+                    StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            });
+            foreach (string directory in directories)
+                directoryLeases.Add(OpenDirectoryLease(directory));
+
+            ValidateRuntimeTree(root, resources);
+            List<FileStream> files = new List<FileStream>();
+            try
+            {
+                foreach (RuntimeResource resource in resources)
+                {
+                    string path = RuntimePath(root, resource.RelativePath);
+                    FileStream stream = OpenLockedRuntimeFile(path);
+                    files.Add(stream);
+                    if (stream.Length != resource.Bytes.Length ||
+                        !string.Equals(
+                            ComputeSha256(stream), resource.Sha256,
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(
+                            "Existing content-addressed runtime file failed verification: " +
+                            resource.RelativePath);
+                }
+                // Close the validation-to-lock window: once every expected
+                // file is held against write/delete, re-enumerate the exact
+                // expected shape before making the bundle available. The file
+                // leases protect every executable/configuration byte for the
+                // launcher lifetime; this final pass also catches a sibling
+                // inserted while those leases were being acquired.
+                ValidateRuntimeTree(root, resources);
+                return files;
+            }
+            catch
+            {
+                foreach (FileStream stream in files) stream.Dispose();
+                throw;
+            }
+        }
+
+        private static void ValidateRuntimeTree(
+            string root, List<RuntimeResource> resources)
+        {
+            HashSet<string> expectedFiles = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (RuntimeResource resource in resources)
+                expectedFiles.Add(RuntimePath(root, resource.RelativePath));
+            List<string> directoryList = ExpectedDirectories(root, resources);
+            HashSet<string> expectedDirectories = new HashSet<string>(
+                directoryList, StringComparer.OrdinalIgnoreCase);
+
+            foreach (string directory in directoryList)
+            {
+                if (!Directory.Exists(directory))
+                    throw new InvalidOperationException(
+                        "Content-addressed runtime directory is missing: " + directory);
+                RejectReparsePoint(directory, "runtime directory");
+                foreach (string entry in Directory.GetFileSystemEntries(directory))
+                {
+                    string full = Path.GetFullPath(entry);
+                    FileAttributes attributes = File.GetAttributes(full);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException(
+                            "Content-addressed runtime contains a reparse point: " + full);
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        if (!expectedDirectories.Contains(full))
+                            throw new InvalidOperationException(
+                                "Content-addressed runtime contains an unexpected directory: " +
+                                full);
+                    }
+                    else if (!expectedFiles.Contains(full))
+                    {
+                        throw new InvalidOperationException(
+                            "Content-addressed runtime contains an unexpected file: " + full);
+                    }
+                }
+            }
+
+            foreach (RuntimeResource resource in resources)
+            {
+                string path = RuntimePath(root, resource.RelativePath);
+                if (!File.Exists(path))
+                    throw new InvalidOperationException(
+                        "Content-addressed runtime file is missing: " +
+                        resource.RelativePath);
+                RejectReparsePoint(path, "runtime file");
+                using (FileStream input = new FileStream(
+                           path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (input.Length != resource.Bytes.Length ||
+                        !string.Equals(
+                            ComputeSha256(input), resource.Sha256,
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(
+                            "Content-addressed runtime file has unexpected bytes: " +
+                            resource.RelativePath);
+                }
+            }
+        }
+
+        private static List<string> ExpectedDirectories(
+            string root, List<RuntimeResource> resources)
+        {
+            HashSet<string> directories = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            directories.Add(Path.GetFullPath(root));
+            foreach (RuntimeResource resource in resources)
+                directories.Add(Path.GetDirectoryName(
+                    RuntimePath(root, resource.RelativePath)));
+            return new List<string>(directories);
+        }
+
+        private static string RuntimePath(string root, string relativePath)
+        {
+            string normalized = relativePath.Replace('/', Path.DirectorySeparatorChar);
+            if (Path.IsPathRooted(normalized))
+                throw new InvalidOperationException(
+                    "Embedded runtime path must be relative: " + relativePath);
+            string fullRoot = Path.GetFullPath(root).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string full = Path.GetFullPath(Path.Combine(fullRoot, normalized));
+            string prefix = fullRoot + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Embedded runtime path escapes its bundle: " + relativePath);
+            return full;
+        }
+
+        private static void RejectReparsePoint(string path, string label)
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException(label + " is a reparse point: " + path);
+        }
+
+        private static SafeFileHandle OpenDirectoryLease(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, FileReadAttributes, FileShareRead | FileShareWrite,
+                IntPtr.Zero, OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+            if (handle == null || handle.IsInvalid)
+                throw RuntimeNativeFailure("open runtime directory", path);
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information))
+            {
+                Exception error = RuntimeNativeFailure("inspect runtime directory", path);
+                handle.Dispose();
+                throw error;
+            }
+            FileAttributes attributes = (FileAttributes)information.FileAttributes;
+            if ((attributes & FileAttributes.Directory) == 0 ||
+                (attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                handle.Dispose();
+                throw new InvalidOperationException(
+                    "Runtime path is not a direct, non-reparse directory: " + path);
+            }
+            return handle;
+        }
+
+        private static FileStream OpenLockedRuntimeFile(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, GenericRead, FileShareRead, IntPtr.Zero, OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagSequentialScan, IntPtr.Zero);
+            if (handle == null || handle.IsInvalid)
+                throw RuntimeNativeFailure("lock runtime file", path);
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information))
+            {
+                Exception error = RuntimeNativeFailure("inspect runtime file", path);
+                handle.Dispose();
+                throw error;
+            }
+            FileAttributes attributes = (FileAttributes)information.FileAttributes;
+            if ((attributes & FileAttributes.Directory) != 0 ||
+                (attributes & FileAttributes.ReparsePoint) != 0 ||
+                information.NumberOfLinks != 1)
+            {
+                handle.Dispose();
+                throw new InvalidOperationException(
+                    "Runtime file must be regular, non-reparse and single-link: " + path);
+            }
+            return new FileStream(handle, FileAccess.Read, 65536, false);
+        }
+
+        private static Exception RuntimeNativeFailure(string operation, string path)
+        {
+            return new InvalidOperationException(
+                "Could not " + operation + " '" + path + "' (Win32 error " +
+                Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
+        }
+
+        private static RuntimePaths BuildPaths(
+            string root, string bundleSha256, List<RuntimeResource> resources)
+        {
             RuntimePaths paths = new RuntimePaths();
             paths.RuntimeDirectory = root;
-            paths.ScriptPath = script;
-            paths.RegistryPath = registry;
-            paths.Stage1ScriptPath = stage1;
-            paths.Stage3ScriptPath = stage3;
-            paths.PipelineSha256 = ComputeSha256(script);
-            paths.RegistrySha256 = ComputeSha256(registry);
+            paths.ScriptPath = RuntimePath(root, "IF_Quant_Pipeline.groovy");
+            paths.RegistryPath = RuntimePath(root, "config/lung_marker_registry.json");
+            paths.Stage1ScriptPath = RuntimePath(root, "qupath_wsi_tile_export.groovy");
+            paths.Stage2OrchestratorPath = RuntimePath(
+                root, "scripts/Invoke-Stage2Sharded.ps1");
+            paths.Stage2IndexBuilderPath = RuntimePath(
+                root, "scripts/build_stage2_run_index.py");
+            paths.Stage3ScriptPath = RuntimePath(root, "aggregate_tiles_to_slide.py");
+            paths.MouseAggregatorPath = RuntimePath(root, "aggregate_to_mouse.py");
+            paths.PipelineSha256 = ResourceHash(resources, "IF_Quant_Pipeline.groovy");
+            paths.RegistrySha256 = ResourceHash(
+                resources, "config/lung_marker_registry.json");
+            paths.BundleSha256 = bundleSha256;
             return paths;
         }
 
+        private static string ResourceHash(
+            List<RuntimeResource> resources, string relativePath)
+        {
+            foreach (RuntimeResource resource in resources)
+                if (string.Equals(
+                        resource.RelativePath, relativePath,
+                        StringComparison.OrdinalIgnoreCase))
+                    return resource.Sha256;
+            throw new InvalidOperationException(
+                "Embedded runtime declaration is missing: " + relativePath);
+        }
+
+        private static string ComputeSha256(byte[] bytes)
+        {
+            using (SHA256 algorithm = SHA256.Create())
+                return Hex(algorithm.ComputeHash(bytes));
+        }
+
+        private static string ComputeSha256(Stream stream)
+        {
+            stream.Position = 0;
+            using (SHA256 algorithm = SHA256.Create())
+            {
+                string hash = Hex(algorithm.ComputeHash(stream));
+                stream.Position = 0;
+                return hash;
+            }
+        }
+
+        private static string Hex(byte[] hash)
+        {
+            StringBuilder text = new StringBuilder(hash.Length * 2);
+            foreach (byte value in hash)
+                text.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+            return text.ToString();
+        }
+
         /// <summary>
-        /// The v1.8.0 half of --self-test. Exit codes 30-45 so they never
+        /// The route/runtime half of --self-test. Exit codes 30-58 so they never
         /// collide with v1.7.2's 10-28. Every check here is a property the
         /// build must not ship without; build.ps1 runs this and discards the
         /// binary on a non-zero result.
@@ -3012,7 +4406,8 @@ namespace IFQuantLauncher
             try
             {
                 RunEnvironment.BuildStage2(
-                    heRequest, null, null, "r", "o", Path.GetTempPath(), null, false);
+                    heRequest, null, null, "r", "engine.groovy",
+                    "o", Path.GetTempPath(), null, false);
             }
             catch (InvalidOperationException) { refused = true; }
             catch (NotImplementedException) { refused = true; }
@@ -3023,7 +4418,7 @@ namespace IFQuantLauncher
             //     besides 2 that declares RequiresQuPath. It had no guard at all
             //     and returned a complete seven-variable stage-1 environment.
             bool stage1Refused = false;
-            try { RunEnvironment.BuildStage1(heRequest, "LEFT"); }
+            try { RunEnvironment.BuildStage1(heRequest, "LEFT", "stage1.groovy"); }
             catch (InvalidOperationException) { stage1Refused = true; }
             catch (NotImplementedException) { stage1Refused = true; }
             if (!stage1Refused) return 31;
@@ -3086,9 +4481,13 @@ namespace IFQuantLauncher
             //    refused on a panel with an area endpoint.
             Dictionary<string, string> env = RunEnvironment.BuildStage2(
                 NewLeftRequest(ImageRoute.IfConfocal), left, thresholdMarkers,
-                "registry", "out", Path.GetTempPath(), null, false);
+                "registry", "engine.groovy", "out", Path.GetTempPath(), null, false);
             if (!env.ContainsKey("IFQ_MIN_INCLUDED_NUCLEI")) return 37;
             if (env["IFQ_MIN_INCLUDED_NUCLEI"] != "0") return 37;
+            if (!string.Equals(
+                    env["IFQ_ENGINE_SCRIPT_PATH"],
+                    Path.GetFullPath("engine.groovy"),
+                    StringComparison.OrdinalIgnoreCase)) return 37;
             RunRequest floored = NewLeftRequest(ImageRoute.IfConfocal);
             floored.MinIncludedNuclei = 3;
             if (left.AreaMarkers.Count > 0 &&
@@ -3141,7 +4540,8 @@ namespace IFQuantLauncher
             try
             {
                 RunEnvironment.BuildStage2(
-                    legacyRequest, left, thresholdMarkers, "r", "o", Path.GetTempPath(),
+                    legacyRequest, left, thresholdMarkers, "r", "engine.groovy",
+                    "o", Path.GetTempPath(),
                     null, false);
             }
             catch (InvalidOperationException) { legacyRefused = true; }
@@ -3156,11 +4556,61 @@ namespace IFQuantLauncher
             typo.AdvancedText = "IFQ_RING_EXPAND_UM=";
             if (!FailClosedGate.Evaluate(typo, left, thresholdMarkers, null).Blocked) return 42;
 
-            // 43 the whole-slide stage scripts really were embedded.
+            // 43 the complete whole-slide runtime tree really was embedded.
             if (paths.Stage1ScriptPath == null || !File.Exists(paths.Stage1ScriptPath)) return 43;
             if (paths.Stage3ScriptPath == null || !File.Exists(paths.Stage3ScriptPath)) return 43;
+            if (paths.Stage2OrchestratorPath == null ||
+                !File.Exists(paths.Stage2OrchestratorPath)) return 43;
+            if (paths.Stage2IndexBuilderPath == null ||
+                !File.Exists(paths.Stage2IndexBuilderPath)) return 43;
+            string[] route2RuntimeFiles = new string[]
+            {
+                Path.Combine(paths.RuntimeDirectory, "aggregate_to_mouse.py"),
+                Path.Combine(paths.RuntimeDirectory, "ifquant", "__init__.py"),
+                Path.Combine(paths.RuntimeDirectory, "ifquant", "adapters.py"),
+                Path.Combine(paths.RuntimeDirectory, "ifquant", "contracts.py"),
+                Path.Combine(paths.RuntimeDirectory, "ifquant", "route_records.py"),
+                Path.Combine(paths.RuntimeDirectory, "ifquant", "stage2_index.py"),
+                Path.Combine(paths.RuntimeDirectory, "schemas", "stage2-run-index.schema.json"),
+                Path.Combine(paths.RuntimeDirectory, "schemas", "measurement-record.schema.json"),
+                Path.Combine(paths.RuntimeDirectory, "schemas",
+                             "wsi-reference-mask-profile.schema.json"),
+                Path.Combine(paths.RuntimeDirectory, "schemas",
+                             "stardist-runtime-manifest.schema.json")
+            };
+            foreach (string requiredRuntimeFile in route2RuntimeFiles)
+                if (!File.Exists(requiredRuntimeFile)) return 43;
             string stage1Text = File.ReadAllText(paths.Stage1ScriptPath, Encoding.UTF8);
             if (stage1Text.IndexOf("IFQ_WSI_INPUT", StringComparison.Ordinal) < 0) return 43;
+            string orchestratorText = File.ReadAllText(
+                paths.Stage2OrchestratorPath, Encoding.UTF8);
+            if (orchestratorText.IndexOf("UseInheritedIfqConfig", StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf("stage2_run_index.json", StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "foreach ($inheritedName in $inheritedIfqConfig.Keys)",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "$envPairs[$inheritedName] = [string]$inheritedIfqConfig[$inheritedName]",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "[string]$StarDistModelPath",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "[string]$StarDistRuntimeManifest",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "$envPairs['IFQ_STARDIST_MODEL_PATH'] = $StarDistModelPath",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "$envPairs['IFQ_STARDIST_RUNTIME_MANIFEST'] = $StarDistRuntimeManifest",
+                    StringComparison.Ordinal) < 0 ||
+                orchestratorText.IndexOf(
+                    "Remove('IFQ_STARDIST_MODEL_PATH')",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                orchestratorText.IndexOf(
+                    "Remove('IFQ_STARDIST_RUNTIME_MANIFEST')",
+                    StringComparison.OrdinalIgnoreCase) >= 0)
+                return 43;
 
             // ---------------------------------------------------------------
             // 44 H2 CANNOT BE BYPASSED BY A PANEL THE LAUNCHER CANNOT RESOLVE.
@@ -3228,7 +4678,8 @@ namespace IFQuantLauncher
             // not (IF_Quant_Pipeline.groovy:873-882), so the variable must
             // actually be emitted.
             Dictionary<string, string> customEnv = RunEnvironment.BuildStage2(
-                customRequest, custom, thresholdMarkers, "reg", "out", Path.GetTempPath(),
+                customRequest, custom, thresholdMarkers, "reg", "engine.groovy",
+                "out", Path.GetTempPath(),
                 null, false);
             if (!customEnv.ContainsKey("IFQ_KRT5_THRESHOLD")) return 44;
             if (customEnv["IFQ_PANEL"] != "MYCUSTOM") return 44;
@@ -3360,13 +4811,15 @@ namespace IFQuantLauncher
             try
             {
                 RunEnvironment.BuildStage2(
-                    undefinedRequest, left, thresholdMarkers, "r", "o", Path.GetTempPath(),
+                    undefinedRequest, left, thresholdMarkers, "r", "engine.groovy",
+                    "o", Path.GetTempPath(),
                     null, false);
             }
             catch (InvalidOperationException) { undefinedRefused = true; }
             if (!undefinedRefused) return 47;
             undefinedRefused = false;
-            try { RunEnvironment.BuildStage1(undefinedRequest, "LEFT"); }
+            try { RunEnvironment.BuildStage1(
+                    undefinedRequest, "LEFT", "stage1.groovy"); }
             catch (InvalidOperationException) { undefinedRefused = true; }
             if (!undefinedRefused) return 47;
             undefinedRefused = false;
@@ -3399,7 +4852,8 @@ namespace IFQuantLauncher
                 FailClosedGate.Evaluate(sealedRequest, left, thresholdMarkers, null);
             if (sealedGate.Blocked || sealedGate.Exploratory) return 48;
             Dictionary<string, string> sealedEnv = RunEnvironment.BuildStage2(
-                sealedRequest, left, thresholdMarkers, "registry", "out",
+                sealedRequest, left, thresholdMarkers,
+                "registry", "engine.groovy", "out",
                 Path.GetTempPath(), null, false);
 
             RunSeal issued = RunSeal.Issue(
@@ -3408,6 +4862,13 @@ namespace IFQuantLauncher
             if (!issued.EnvironmentSaysFrozen) return 48;
             if (issued.Classification != "THRESHOLDS_FROZEN") return 48;
             if (issued.Value("IFQ_PANEL") != "LEFT") return 48;
+            SealInput wrongEngineScript = NewSealInput(
+                sealedRequest, left, thresholdMarkers, sealedGate, sealedEnv);
+            wrongEngineScript.Environment = new Dictionary<string, string>(
+                sealedEnv, StringComparer.OrdinalIgnoreCase);
+            wrongEngineScript.Environment["IFQ_ENGINE_SCRIPT_PATH"] =
+                Path.GetFullPath("different-engine.groovy");
+            if (!SealRefuses(wrongEngineScript)) return 48;
 
             // N1, reconstructed: the record the gate produced BEFORE the N1 fix
             // (3/3 frozen, KRT5=fixed_predeclared(500)) beside the environment
@@ -3474,19 +4935,59 @@ namespace IFQuantLauncher
             stage3.Environment["IFQ_PANEL"] = "LEFT";
             if (!SealRefuses(stage3)) return 48;
 
+            SealInput stage4 = NewSealInput(
+                slideRequest, left, thresholdMarkers, sealedGate,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            stage4.Stage = LaunchStage.Stage4Python;
+            if (RunSeal.Issue(stage4) == null) return 48;
+            stage4.Environment = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            stage4.Environment["IFQ_PANEL"] = "LEFT";
+            if (!SealRefuses(stage4)) return 48;
+
             // Stage 1 must tile under the panel the run is recorded as.
             SealInput stage1 = NewSealInput(
                 slideRequest, left, thresholdMarkers, sealedGate,
-                RunEnvironment.BuildStage1(slideRequest, "LEFT"));
+                RunEnvironment.BuildStage1(
+                    slideRequest, "LEFT", "stage1.groovy"));
             stage1.Stage = LaunchStage.Stage1QuPath;
             if (RunSeal.Issue(stage1) == null) return 48;
+            if (string.IsNullOrWhiteSpace(
+                    stage1.Environment["IFQ_WSI_STAGE1_SCRIPT_PATH"])) return 48;
+            if (stage1.Environment.ContainsKey(
+                    "IFQ_WSI_REFERENCE_MASK_PROFILE")) return 48;
             Dictionary<string, string> stage1Wrong = RunEnvironment.BuildStage1(
-                slideRequest, "LEFT");
+                slideRequest, "LEFT", "stage1.groovy");
             stage1Wrong["IFQ_WSI_PANEL"] = "RIGHT";
             SealInput stage1Bad = NewSealInput(
                 slideRequest, left, thresholdMarkers, sealedGate, stage1Wrong);
             stage1Bad.Stage = LaunchStage.Stage1QuPath;
             if (!SealRefuses(stage1Bad)) return 48;
+
+            SealInput wrongStage1Script = NewSealInput(
+                slideRequest, left, thresholdMarkers, sealedGate,
+                RunEnvironment.BuildStage1(
+                    slideRequest, "LEFT", "stage1.groovy"));
+            wrongStage1Script.Stage = LaunchStage.Stage1QuPath;
+            wrongStage1Script.ExpectedStage1ScriptPath = Path.GetFullPath(
+                "different-stage1.groovy");
+            if (!SealRefuses(wrongStage1Script)) return 48;
+
+            slideRequest.WsiReferenceMaskProfile = Path.Combine(
+                Path.GetTempPath(), "reference-mask-profile.json");
+            SealInput referenceProfileStage1 = NewSealInput(
+                slideRequest, left, thresholdMarkers, sealedGate,
+                RunEnvironment.BuildStage1(
+                    slideRequest, "LEFT", "stage1.groovy"));
+            referenceProfileStage1.Stage = LaunchStage.Stage1QuPath;
+            RunSeal referenceProfileSeal = RunSeal.Issue(referenceProfileStage1);
+            if (referenceProfileSeal == null || !string.Equals(
+                    referenceProfileSeal.Value("IFQ_WSI_REFERENCE_MASK_PROFILE"),
+                    Path.GetFullPath(slideRequest.WsiReferenceMaskProfile),
+                    StringComparison.OrdinalIgnoreCase)) return 48;
+            referenceProfileStage1.ExpectedReferenceMaskProfilePath = Path.Combine(
+                Path.GetTempPath(), "different-reference-mask-profile.json");
+            if (!SealRefuses(referenceProfileStage1)) return 48;
 
             // ---------------------------------------------------------------
             // 49 N1 AT THE GATE: the Advanced box may not overwrite a cutoff
@@ -3537,7 +5038,8 @@ namespace IFQuantLauncher
             if (!nuclearGate.FolderStamps().Contains(FailClosedGate.ExploratoryStamp)) return 50;
             if (!HasCode(nuclearGate, "H2_NO_ANALYSIS_CHANNELS")) return 50;
             Dictionary<string, string> nuclearEnv = RunEnvironment.BuildStage2(
-                nuclearRequest, nuclearOnly, thresholdMarkers, "registry", "out",
+                nuclearRequest, nuclearOnly, thresholdMarkers,
+                "registry", "engine.groovy", "out",
                 Path.GetTempPath(), null, false);
             if (RunRecord.Build(nuclearRequest, nuclearGate, nuclearEnv, "1.8.0.0", "X64",
                                 "f", "i", 0, "complete", "a", "b", null)
@@ -3658,7 +5160,321 @@ namespace IFQuantLauncher
             GateResult legacyArmGate =
                 FailClosedGate.Evaluate(legacyArm, left, thresholdMarkers, armTools);
             if (HasCode(legacyArmGate, "FIJI_ARM64_LAUNCHER_UNRELIABLE")) return 52;
+            if (!Stage1LayoutSelfTest()) return 54;
+            if (!Route2ArgumentSelfTest(left, thresholdMarkers)) return 55;
+            if (!ReferenceMaskProfilePathSelfTest() ||
+                !StarDistAuthorityPathSelfTest(left, thresholdMarkers)) return 59;
             return 0;
+        }
+
+        private static bool Route2ArgumentSelfTest(
+            PanelDef panel, HashSet<string> thresholdMarkers)
+        {
+            RunRequest request = NewLeftRequest(ImageRoute.IfSlideScanner);
+            request.WsiInput = "input.vsi";
+            request.WsiOutput = Path.Combine(Path.GetTempPath(), "ifq-stage1-root");
+            request.Invocation = FijiInvocation.BundledJvm;
+            request.Segmenter = "classic";
+            request.Projection = "max";
+            request.TissueMode = "auto";
+            request.CompartmentMode = "optional";
+            request.WholeFieldCompartment = "unassigned";
+            Dictionary<string, string> environment = RunEnvironment.BuildStage2(
+                request, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                request.WsiOutput,
+                request.WsiOutput, null, false);
+            if (environment["IFQ_STARDIST_PROB"] != "0.5" ||
+                environment["IFQ_STARDIST_NMS"] != "0.4" ||
+                environment["IFQ_STARDIST_TILES"] != "1" ||
+                environment.ContainsKey("IFQ_STARDIST_MODEL_PATH") ||
+                environment.ContainsKey("IFQ_STARDIST_RUNTIME_MANIFEST") ||
+                !string.Equals(
+                    environment["IFQ_ENGINE_SCRIPT_PATH"],
+                    Path.GetFullPath("engine.groovy"),
+                    StringComparison.OrdinalIgnoreCase)) return false;
+
+            request.AdvancedText =
+                "IFQ_STARDIST_PROB=0.50\r\n" +
+                "IFQ_STARDIST_NMS=4e-1\r\n" +
+                "IFQ_STARDIST_TILES=01";
+            environment = RunEnvironment.BuildStage2(
+                request, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                request.WsiOutput,
+                request.WsiOutput, null, false);
+            if (environment["IFQ_STARDIST_PROB"] != "0.5" ||
+                environment["IFQ_STARDIST_NMS"] != "0.4" ||
+                environment["IFQ_STARDIST_TILES"] != "1") return false;
+
+            RunConfiguration config = new RunConfiguration();
+            config.Request = request;
+            config.Environment = environment;
+            config.Stage2OrchestratorPath = @"C:\runtime\scripts\Invoke-Stage2Sharded.ps1";
+            config.FijiDirectory = @"C:\Program Files\Fiji\";
+            config.ScriptPath = @"C:\runtime\IF_Quant_Pipeline.groovy";
+            config.RegistryPath = @"C:\runtime\config\lung_marker_registry.json";
+            config.PythonExecutable = @"C:\Python\python.exe";
+            Stage1SlideLayout slide = new Stage1SlideLayout();
+            slide.TilesDirectory = @"D:\run\slide_A\tiles";
+            slide.SlideDirectory = @"D:\run\slide_A";
+            string arguments = MainForm.BuildStage2OrchestratorArguments(config, slide);
+            if (arguments.IndexOf("-UseInheritedIfqConfig", StringComparison.Ordinal) < 0 ||
+                arguments.IndexOf("-StarDistProbability \"0.5\"", StringComparison.Ordinal) < 0 ||
+                arguments.IndexOf("-StarDistNms \"0.4\"", StringComparison.Ordinal) < 0 ||
+                arguments.IndexOf("-StarDistTiles \"1\"", StringComparison.Ordinal) < 0 ||
+                arguments.IndexOf("-StarDistModelPath", StringComparison.Ordinal) >= 0 ||
+                arguments.IndexOf("-StarDistRuntimeManifest", StringComparison.Ordinal) >= 0 ||
+                arguments.IndexOf(
+                    "-FijiDir " + WindowsCommandLine.Quote(config.FijiDirectory) +
+                    " -ScriptPath ", StringComparison.Ordinal) < 0)
+                return false;
+
+            request.AdvancedText = "IFQ_STARDIST_PROB=2";
+            try
+            {
+                RunEnvironment.BuildStage2(
+                    request, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                    request.WsiOutput,
+                    request.WsiOutput, null, false);
+                return false;
+            }
+            catch (InvalidOperationException) { return true; }
+        }
+
+        private static bool Stage1LayoutSelfTest()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "IFQuantLauncher-stage1-layout-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                string slide = Path.Combine(root, "slide_A");
+                string tiles = Path.Combine(slide, "tiles");
+                Directory.CreateDirectory(tiles);
+                File.WriteAllText(Path.Combine(tiles, "samplesheet.csv"), "filename\n",
+                                  new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(slide, "tile_manifest.csv"), "tile_id\n",
+                                  new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(slide, "tile_candidate_manifest.csv"),
+                                  "tile_id\n", new UTF8Encoding(false));
+                string manifest = Path.Combine(root, "stage1_manifest.json");
+                File.WriteAllText(manifest,
+                                  "{\"slides\":[{\"slide_stem\":\"slide_A\"," +
+                                  "\"dry_run\":true,\"coverage_complete\":false," +
+                                  "\"n_written\":0}]}",
+                                  new UTF8Encoding(false));
+                List<Stage1SlideLayout> layouts = Stage1LayoutDiscovery.Discover(root);
+                if (layouts.Count != 1 || layouts[0].SlideStem != "slide_A" ||
+                    layouts[0].TilesDirectory != tiles) return false;
+                MainForm.AssertStage1DryRunManifest(root);
+
+                File.WriteAllText(manifest,
+                    "{\"slides\":[{\"slide_stem\":\"slide_A\"," +
+                    "\"dry_run\":false,\"coverage_complete\":false," +
+                    "\"n_written\":0}]}",
+                    new UTF8Encoding(false));
+                bool nonDryRefused = false;
+                try { MainForm.AssertStage1DryRunManifest(root); }
+                catch (InvalidOperationException) { nonDryRefused = true; }
+                if (!nonDryRefused) return false;
+
+                File.WriteAllText(manifest,
+                    "{\"slides\":[{\"slide_stem\":\"slide_A\"}," +
+                    "{\"slide_stem\":\"SLIDE_A\"}]}", new UTF8Encoding(false));
+                bool duplicateRefused = false;
+                try { Stage1LayoutDiscovery.Discover(root); }
+                catch (InvalidOperationException) { duplicateRefused = true; }
+                if (!duplicateRefused) return false;
+
+                File.WriteAllText(manifest,
+                    "{\"slides\":[{\"slide_stem\":\"..\\\\outside\"}]}",
+                    new UTF8Encoding(false));
+                bool traversalRefused = false;
+                try { Stage1LayoutDiscovery.Discover(root); }
+                catch (InvalidOperationException) { traversalRefused = true; }
+                return traversalRefused;
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        private static bool ReferenceMaskProfilePathSelfTest()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "IFQuantLauncher-reference-mask-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(root);
+                string valid = Path.Combine(root, "profile.json");
+                File.WriteAllText(
+                    valid, "{\"profile_id\":\"path-validation-fixture\"}",
+                    new UTF8Encoding(false));
+                if (!string.Equals(
+                        MainForm.NormalizeOptionalReferenceMaskProfile(valid),
+                        Path.GetFullPath(valid), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (MainForm.NormalizeOptionalReferenceMaskProfile("") != "")
+                    return false;
+
+                string array = Path.Combine(root, "array.json");
+                File.WriteAllText(array, "[]", new UTF8Encoding(false));
+                bool arrayRefused = false;
+                try { MainForm.NormalizeOptionalReferenceMaskProfile(array); }
+                catch (InvalidOperationException) { arrayRefused = true; }
+                if (!arrayRefused) return false;
+
+                string wrongExtension = Path.Combine(root, "profile.txt");
+                File.WriteAllText(wrongExtension, "{}", new UTF8Encoding(false));
+                bool extensionRefused = false;
+                try
+                {
+                    MainForm.NormalizeOptionalReferenceMaskProfile(wrongExtension);
+                }
+                catch (InvalidOperationException) { extensionRefused = true; }
+                if (!extensionRefused) return false;
+
+                bool missingRefused = false;
+                try
+                {
+                    MainForm.NormalizeOptionalReferenceMaskProfile(
+                        Path.Combine(root, "missing.json"));
+                }
+                catch (InvalidOperationException) { missingRefused = true; }
+                return missingRefused;
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        private static bool StarDistAuthorityPathSelfTest(
+            PanelDef panel, HashSet<string> thresholdMarkers)
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "IFQuantLauncher-stardist-authority-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(root);
+                string model = Path.Combine(root, "model.zip");
+                string manifest = Path.Combine(root, "runtime.json");
+                File.WriteAllBytes(model, new byte[] { 1, 2, 3, 4 });
+                File.WriteAllText(
+                    manifest,
+                    "{\"schema_version\":\"1.0.0\",\"profile_id\":\"self-test\"," +
+                    "\"artifacts\":[{},{},{},{}]}",
+                    new UTF8Encoding(false));
+                if (!string.Equals(
+                        MainForm.NormalizeRequiredStarDistModelPath(model),
+                        Path.GetFullPath(model), StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        MainForm.NormalizeRequiredStarDistRuntimeManifestPath(manifest),
+                        Path.GetFullPath(manifest), StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                RunRequest request = NewLeftRequest(ImageRoute.IfConfocal);
+                request.Segmenter = "stardist";
+                request.StarDistModelPath = model;
+                request.StarDistRuntimeManifestPath = manifest;
+                Dictionary<string, string> environment = RunEnvironment.BuildStage2(
+                    request, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                    "out", Path.GetTempPath(), null, false);
+                if (!string.Equals(
+                        environment["IFQ_STARDIST_MODEL_PATH"],
+                        Path.GetFullPath(model), StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        environment["IFQ_STARDIST_RUNTIME_MANIFEST"],
+                        Path.GetFullPath(manifest), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                GateResult gate = FailClosedGate.Evaluate(
+                    request, panel, thresholdMarkers, null);
+                if (gate.Blocked || !HasCode(gate, "STARDIST_AUTHORITY_SELECTED"))
+                    return false;
+                SealInput sealedInput = NewSealInput(
+                    request, panel, thresholdMarkers, gate, environment);
+                if (RunSeal.Issue(sealedInput) == null) return false;
+
+                RunConfiguration config = new RunConfiguration();
+                config.Request = request;
+                config.Environment = environment;
+                config.Stage2OrchestratorPath =
+                    @"C:\runtime\scripts\Invoke-Stage2Sharded.ps1";
+                config.FijiDirectory = @"C:\Program Files\Fiji\";
+                config.ScriptPath = @"C:\runtime\IF_Quant_Pipeline.groovy";
+                config.RegistryPath = @"C:\runtime\config\lung_marker_registry.json";
+                config.PythonExecutable = @"C:\Python\python.exe";
+                Stage1SlideLayout slide = new Stage1SlideLayout();
+                slide.TilesDirectory = @"D:\run\slide_A\tiles";
+                slide.SlideDirectory = @"D:\run\slide_A";
+                string arguments = MainForm.BuildStage2OrchestratorArguments(
+                    config, slide);
+                if (arguments.IndexOf(
+                        "-StarDistModelPath " + WindowsCommandLine.Quote(
+                            Path.GetFullPath(model)),
+                        StringComparison.Ordinal) < 0 ||
+                    arguments.IndexOf(
+                        "-StarDistRuntimeManifest " + WindowsCommandLine.Quote(
+                            Path.GetFullPath(manifest)),
+                        StringComparison.Ordinal) < 0)
+                    return false;
+
+                sealedInput.ExpectedStarDistModelPath =
+                    Path.Combine(root, "other-model.zip");
+                if (!SealRefuses(sealedInput)) return false;
+
+                RunRequest missing = NewLeftRequest(ImageRoute.IfConfocal);
+                missing.Segmenter = "stardist";
+                bool missingRefused = false;
+                try
+                {
+                    RunEnvironment.BuildStage2(
+                        missing, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                        "out", Path.GetTempPath(), null, false);
+                }
+                catch (InvalidOperationException) { missingRefused = true; }
+                if (!missingRefused) return false;
+
+                RunRequest classic = NewLeftRequest(ImageRoute.IfConfocal);
+                classic.Segmenter = "classic";
+                classic.StarDistModelPath = model;
+                classic.StarDistRuntimeManifestPath = manifest;
+                Dictionary<string, string> classicEnvironment =
+                    RunEnvironment.BuildStage2(
+                        classic, panel, thresholdMarkers, "registry.json", "engine.groovy",
+                        "out", Path.GetTempPath(), null, false);
+                if (classicEnvironment.ContainsKey("IFQ_STARDIST_MODEL_PATH") ||
+                    classicEnvironment.ContainsKey(
+                        "IFQ_STARDIST_RUNTIME_MANIFEST"))
+                    return false;
+
+                RunRequest legacyStarDist =
+                    NewLeftRequest(ImageRoute.LegacyFiji172);
+                legacyStarDist.Segmenter = "stardist";
+                GateResult legacyStarDistGate = FailClosedGate.Evaluate(
+                    legacyStarDist, panel, thresholdMarkers, null);
+                if (!legacyStarDistGate.Blocked || !HasCode(
+                        legacyStarDistGate,
+                        "LEGACY_STARDIST_AUTHORITY_UNREPRESENTABLE"))
+                    return false;
+
+                string invalidManifest = Path.Combine(root, "invalid.json");
+                File.WriteAllText(invalidManifest, "[]", new UTF8Encoding(false));
+                bool invalidRefused = false;
+                try
+                {
+                    MainForm.NormalizeRequiredStarDistRuntimeManifestPath(
+                        invalidManifest);
+                }
+                catch (InvalidOperationException) { invalidRefused = true; }
+                return invalidRefused;
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
         }
 
         /// A stage 2 seal input with the fixture defaults the self-test uses.
@@ -3673,6 +5489,28 @@ namespace IFQuantLauncher
             input.EngineThresholdMarkers = engineThresholdMarkers;
             input.Gate = gate;
             input.Environment = env;
+            string engineScriptPath;
+            if (env != null && env.TryGetValue(
+                    "IFQ_ENGINE_SCRIPT_PATH", out engineScriptPath))
+                input.ExpectedEngineScriptPath = engineScriptPath;
+            string starDistModelPath;
+            if (env != null && env.TryGetValue(
+                    "IFQ_STARDIST_MODEL_PATH", out starDistModelPath))
+                input.ExpectedStarDistModelPath = starDistModelPath;
+            string starDistRuntimeManifestPath;
+            if (env != null && env.TryGetValue(
+                    "IFQ_STARDIST_RUNTIME_MANIFEST",
+                    out starDistRuntimeManifestPath))
+                input.ExpectedStarDistRuntimeManifestPath =
+                    starDistRuntimeManifestPath;
+            string stage1ScriptPath;
+            if (env != null && env.TryGetValue(
+                    "IFQ_WSI_STAGE1_SCRIPT_PATH", out stage1ScriptPath))
+                input.ExpectedStage1ScriptPath = stage1ScriptPath;
+            string referenceMaskProfilePath;
+            if (env != null && env.TryGetValue(
+                    "IFQ_WSI_REFERENCE_MASK_PROFILE", out referenceMaskProfilePath))
+                input.ExpectedReferenceMaskProfilePath = referenceMaskProfilePath;
             input.OutputDirectory = null;
             input.AdvancedKeys = new string[0];
             return input;
@@ -3709,45 +5547,68 @@ namespace IFQuantLauncher
             return request;
         }
 
-        private static bool TryExtractResource(string resourceName, string destination)
+        private static bool ArgumentRoundTripSelfTest()
         {
+            string executable = Assembly.GetExecutingAssembly().Location;
+            string output = Path.Combine(
+                Path.GetTempPath(), "IFQuantLauncher-argv-" +
+                Guid.NewGuid().ToString("N") + ".txt");
+            string[] payload = new string[]
+            {
+                "",
+                "plain",
+                "two words",
+                "tab\tvalue",
+                "Unicode-한글",
+                "embedded\"quote",
+                "slash\\\"quote",
+                "slashes\\\\\"quote",
+                @"C:\Program Files\Fiji\",
+                "one\\",
+                "two\\\\",
+                "three\\\\\\",
+                "four\\\\\\\\"
+            };
             try
             {
-                Assembly assembly = Assembly.GetExecutingAssembly();
-                using (Stream input = assembly.GetManifestResourceStream(resourceName))
+                StringBuilder arguments = new StringBuilder();
+                arguments.Append(WindowsCommandLine.Quote("--argv-echo"));
+                arguments.Append(' ').Append(WindowsCommandLine.Quote(output));
+                foreach (string value in payload)
+                    arguments.Append(' ').Append(WindowsCommandLine.Quote(value));
+
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = executable;
+                info.Arguments = arguments.ToString();
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+                using (Process child = Process.Start(info))
                 {
-                    if (input == null) return false;
-                    using (FileStream output = new FileStream(
-                               destination, FileMode.Create, FileAccess.Write, FileShare.None))
-                        input.CopyTo(output);
+                    if (!child.WaitForExit(10000))
+                    {
+                        try { child.Kill(); } catch { }
+                        return false;
+                    }
+                    if (child.ExitCode != 0) return false;
+                }
+
+                string[] lines = File.ReadAllLines(output, Encoding.UTF8);
+                if (lines.Length != payload.Length) return false;
+                for (int index = 0; index < payload.Length; index++)
+                {
+                    string prefix = index.ToString(CultureInfo.InvariantCulture) + ":";
+                    if (!lines[index].StartsWith(prefix, StringComparison.Ordinal)) return false;
+                    string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(
+                        lines[index].Substring(prefix.Length)));
+                    if (!string.Equals(decoded, payload[index], StringComparison.Ordinal))
+                        return false;
                 }
                 return true;
             }
             catch { return false; }
-        }
-
-        private static string ComputeSha256(string path)
-        {
-            using (SHA256 algorithm = SHA256.Create())
-            using (FileStream stream = File.OpenRead(path))
+            finally
             {
-                byte[] hash = algorithm.ComputeHash(stream);
-                StringBuilder text = new StringBuilder(hash.Length * 2);
-                foreach (byte value in hash)
-                    text.Append(value.ToString("x2", CultureInfo.InvariantCulture));
-                return text.ToString();
-            }
-        }
-
-        private static void ExtractResource(string resourceName, string destination)
-        {
-            Assembly assembly = Assembly.GetExecutingAssembly();
-            using (Stream input = assembly.GetManifestResourceStream(resourceName))
-            {
-                if (input == null)
-                    throw new InvalidOperationException("Embedded runtime resource is missing: " + resourceName);
-                using (FileStream output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None))
-                    input.CopyTo(output);
+                try { if (File.Exists(output)) File.Delete(output); } catch { }
             }
         }
 
@@ -3756,6 +5617,20 @@ namespace IFQuantLauncher
             try
             {
                 RuntimePaths paths = EnsureExtracted();
+                string expectedRuntimeName =
+                    Assembly.GetExecutingAssembly().GetName().Version + "-" +
+                    paths.BundleSha256;
+                if (paths.BundleSha256 == null || paths.BundleSha256.Length != 64 ||
+                    !string.Equals(
+                        Path.GetFileName(paths.RuntimeDirectory), expectedRuntimeName,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        EnsureExtracted().RuntimeDirectory, paths.RuntimeDirectory,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(paths.MouseAggregatorPath) ||
+                    File.ReadAllText(paths.MouseAggregatorPath, Encoding.UTF8).IndexOf(
+                        "mouse_level_summary.csv", StringComparison.Ordinal) < 0)
+                    return 56;
                 if (!File.Exists(paths.ScriptPath) || new FileInfo(paths.ScriptPath).Length < 1000)
                     return 11;
                 string pipelineText = File.ReadAllText(paths.ScriptPath, Encoding.UTF8);
@@ -3828,7 +5703,10 @@ namespace IFQuantLauncher
                         StringComparison.OrdinalIgnoreCase))
                     return 26;
                 if (pipelineText.IndexOf(
-                        "if (MAX_IMAGES > 0) files = files.take(MAX_IMAGES)",
+                        "maxImagesExcludedFiles",
+                        StringComparison.Ordinal) < 0 ||
+                    pipelineText.IndexOf(
+                        "incomplete_max_images_limit",
                         StringComparison.Ordinal) < 0 ||
                     pipelineText.IndexOf(
                         "if (DISPLAY_PREVIEW_ONLY) files = files.take(5)",
@@ -3918,6 +5796,9 @@ namespace IFQuantLauncher
                         !string.Equals(Path.GetFullPath(expected), Path.GetFullPath(resolved), StringComparison.OrdinalIgnoreCase))
                         return 15;
                 }
+                if (!ArgumentRoundTripSelfTest()) return 57;
+                if (!ProcessJob.SelfTest(
+                        Assembly.GetExecutingAssembly().Location)) return 58;
                 return 0;
             }
             catch (Exception ex)

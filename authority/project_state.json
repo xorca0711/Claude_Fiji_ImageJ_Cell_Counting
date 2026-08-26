@@ -1,10 +1,10 @@
 {
   "$schema": "../schemas/project-state.schema.json",
-  "schema_version": "1.0.0",
-  "authority_revision": "2026-08-25.1",
+  "schema_version": "1.1.0",
+  "authority_revision": "2026-08-26.1",
   "study_id": "ifquant-lung-g-surf-2026",
   "title": "IFQuant-Lung G-SURF project authority",
-  "as_of": "2026-08-25",
+  "as_of": "2026-08-26",
   "authority": {
     "canonical_source": "authority/project_state.json",
     "generated_status": "docs/generated/AUTHORITY_STATUS.md",
@@ -123,8 +123,8 @@
       "id": "he_histology",
       "label": "H&E histology",
       "status": "ENGINEERING_QC_ONLY",
-      "scope": "H0-H3 engineering and image-QC artifacts only; H4 and later stages are unvalidated and blocked from scientific interpretation.",
-      "evidence_basis": "REPOSITORY_CONTRACT_AND_SUBMISSION_DOCUMENTS; DECLARED_LOCAL_R1_H4_PACKAGES_NOT_AVAILABLE_AT_CONFIGURED_PATHS",
+      "scope": "H0-H3 engineering and image-QC artifacts plus H4 review and H7-H8 aggregation mechanics; H4 and later biological outputs remain unvalidated and blocked from scientific interpretation.",
+      "evidence_basis": "REPOSITORY_CONTRACT_SUBMISSION_DOCUMENTS_AND_2026-08-26_LOCAL_REVERIFICATION; 4_VSI_AND_16_ETS_RAW_ARTIFACTS_RECONCILED; R1_87_FILES_8_SECTIONS; H4_96_CANDIDATES_10_TOUCHED_0_COMPLETE",
       "stages": [
         {
           "range": "H0-H3",
@@ -135,23 +135,23 @@
           "status": "UNVALIDATED_BLOCKED"
         }
       ],
-      "promotion_gate": "Complete and independently review anatomy, lesion-candidate, topology, blinded-review, and section-to-mouse aggregation gates before any lesion claim."
+      "promotion_gate": "Complete the blinded H4 review and independently validate anatomy, lesion-candidate, topology, and section-to-mouse interpretation before any lesion claim."
     },
     {
       "id": "wsi_threshold_pilot",
       "label": "WSI threshold pilot",
       "status": "ENGINEERING_PILOT_ONLY",
-      "scope": "Six-tile engineering pilot only; not a calibrated global biological endpoint.",
-      "evidence_basis": "REPOSITORY_DOCUMENTATION_AND_SUBMISSION_DOCUMENTS; GENERATING_PILOT_ARTIFACTS_NOT_INDEPENDENTLY_REVERIFIED",
+      "scope": "Legacy six-tile evidence plus prospective real-source engineering smokes; not a calibrated global biological endpoint.",
+      "evidence_basis": "REPOSITORY_CONTRACT_SUBMISSION_DOCUMENTS_AND_2026-08-26_REAL_SOURCE_SMOKES; AUTOMATIC_AND_EXTERNAL_REFERENCE_MASK_PATHS_RECONCILED; SCIENTIFIC_REVIEW_NOT_PERFORMED",
       "tile_count": 6,
-      "promotion_gate": "Demonstrate complete declared tile coverage, frozen modality-specific calibration, duplicate-safe aggregation, and an auditable tissue and airway reference space."
+      "promotion_gate": "Review tissue and airway masks, freeze modality-specific calibration, complete an uncapped declared-section run, and validate the endpoint across an adequate mouse-level sample."
     }
   ],
   "project_gates": [
     {
       "id": "G-CONTRACT-INTEGRATION",
-      "status": "OPEN_ENGINEERING_GATE",
-      "acceptance": "All three route adapters emit the versioned measurement record, aggregation validates eligibility before pooling, and integration fixtures reject unevaluable, duplicate, channel-mismatched, hash-drifted, failed, and rejected records."
+      "status": "ENGINEERING_COMPLETE",
+      "acceptance": "Versioned route adapters, provenance-bound aggregation, and rejection fixtures cover unevaluable, duplicate, channel-mismatched, hash-drifted, incomplete, failed, and rejected records."
     },
     {
       "id": "G-CONFOCAL-DENOMINATOR",
@@ -165,13 +165,18 @@
     },
     {
       "id": "G-HE-VALIDATION",
-      "status": "BLOCKED",
-      "acceptance": "H4 and later validation stages are completed with traceable review evidence before H&E is promoted beyond engineering and QC."
+      "status": "OPEN_SCIENTIFIC_BLOCKER",
+      "acceptance": "Complete blinded H4 scoring and independent expert validation of anatomy, lesion candidates, topology, and mouse-level interpretation before H&E is promoted beyond engineering and QC."
     },
     {
       "id": "G-WSI-VALIDATION",
-      "status": "BLOCKED",
-      "acceptance": "The WSI workflow passes coverage, calibration, aggregation, and reference-space validation on data beyond the six-tile pilot."
+      "status": "OPEN_SCIENTIFIC_BLOCKER",
+      "acceptance": "Expert-review tissue and airway reference masks, freeze calibration, run an uncapped declared section, and validate the WSI endpoint across an adequate mouse-level sample."
+    },
+    {
+      "id": "G-SEGMENTATION-VALIDATION",
+      "status": "OPEN_SCIENTIFIC_BLOCKER",
+      "acceptance": "Replay the sealed StarDist runtime and explicit model on a supported deployment fixture, then complete a blinded expert benchmark and freeze model and threshold acceptance criteria before scientific use."
     }
   ]
 }

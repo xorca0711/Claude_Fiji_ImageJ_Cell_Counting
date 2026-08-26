@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ifquant-lung.invalid/schemas/wsi-reference-mask-profile.schema.json",
+  "title": "IFQuant WSI reference-mask profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "profile_id",
+    "review_state",
+    "review_protocol_id",
+    "coordinate_space",
+    "mask_logic",
+    "slides"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://ifquant-lung.invalid/schemas/wsi-reference-mask-profile.schema.json"
+    },
+    "schema_version": { "const": "1.0.0" },
+    "profile_id": { "$ref": "#/$defs/nonEmptyString" },
+    "review_state": {
+      "enum": ["engineering_unreviewed", "expert_reviewed"]
+    },
+    "review_protocol_id": { "$ref": "#/$defs/nonEmptyString" },
+    "coordinate_space": {
+      "const": "selected_series_downsample_grid"
+    },
+    "mask_logic": {
+      "const": "tissue_foreground_minus_airway_foreground"
+    },
+    "slides": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/slide" }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)(?!.*[\\t\\r\\n]).*\\S$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "portableRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*\\/$)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)(?!.*[\\t\\r\\n])(?!\\s).*\\S$"
+    },
+    "maskArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "size_bytes", "sha256"],
+      "properties": {
+        "relative_path": { "$ref": "#/$defs/portableRelativePath" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "slide": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_vsi",
+        "source_package_sha256",
+        "series_index",
+        "full_resolution_width",
+        "full_resolution_height",
+        "downsample",
+        "mask_width",
+        "mask_height",
+        "tissue_mask",
+        "airway_mask"
+      ],
+      "properties": {
+        "source_vsi": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\s)(?!.*[\\t\\r\\n])[^/\\\\:]+\\.[Vv][Ss][Ii]$"
+        },
+        "source_package_sha256": { "$ref": "#/$defs/sha256" },
+        "series_index": { "type": "integer", "minimum": 0 },
+        "full_resolution_width": { "type": "integer", "minimum": 1 },
+        "full_resolution_height": { "type": "integer", "minimum": 1 },
+        "downsample": { "type": "number", "exclusiveMinimum": 0 },
+        "mask_width": { "type": "integer", "minimum": 1 },
+        "mask_height": { "type": "integer", "minimum": 1 },
+        "tissue_mask": { "$ref": "#/$defs/maskArtifact" },
+        "airway_mask": { "$ref": "#/$defs/maskArtifact" }
+      }
+    }
+  }
+}

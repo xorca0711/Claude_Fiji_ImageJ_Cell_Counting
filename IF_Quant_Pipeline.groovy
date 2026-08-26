@@ -102,6 +102,9 @@ import groovy.json.JsonSlurper
 import java.awt.Color
 import java.awt.Font
 import java.awt.Rectangle
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -151,8 +154,402 @@ def envInt = { String name, int fallback ->
 def envDouble = { String name, double fallback ->
   parseDoubleSetting(name, envOr(name, fallback.toString()))
 }
+def sha256Bytes(byte[] payload) {
+  def digest = MessageDigest.getInstance("SHA-256")
+  digest.update(payload)
+  return digest.digest().collect { String.format("%02x", it & 0xff) }.join()
+}
+def atomicWriteBytes(File target, byte[] payload) {
+  File absolute = target.getAbsoluteFile()
+  File parent = absolute.parentFile
+  if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+    throw new IllegalArgumentException(
+      "Cannot create atomic publication directory for " + absolute)
+  }
+  def temporary = Files.createTempFile(
+    parent.toPath(), "." + absolute.name + ".", ".tmp")
+  try {
+    def output = new FileOutputStream(temporary.toFile())
+    try {
+      output.write(payload)
+      output.flush()
+      output.fd.sync()
+    } finally {
+      output.close()
+    }
+    // The canonical filename appears only after the complete bytes have been
+    // flushed. Requiring an atomic same-directory rename keeps a failed export
+    // from masquerading as a current run artifact.
+    Files.move(
+      temporary, absolute.toPath(),
+      StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+  } finally {
+    Files.deleteIfExists(temporary)
+  }
+}
+def outputArtifactRecord(File outputRoot, String role, String relativePath,
+                         Map identity = [:]) {
+  String normalized = relativePath == null ? "" : relativePath.replace('\\', '/')
+  if (normalized.isEmpty() || normalized.startsWith("/") ||
+      normalized ==~ /^[A-Za-z]:.*/ || normalized.tokenize('/').contains("..")) {
+    throw new IllegalArgumentException(
+      "Unsafe sealed output relative path for " + role + ": " + relativePath)
+  }
+  File root = outputRoot.getCanonicalFile()
+  File artifact = new File(root, normalized).getCanonicalFile()
+  if (!artifact.toPath().startsWith(root.toPath())) {
+    throw new IllegalArgumentException(
+      "Sealed output escapes the run folder for " + role + ": " + relativePath)
+  }
+  def content = contentSnapshot(artifact, "sealed output " + role)
+  def record = [role: role, relative_path: normalized,
+                size_bytes: content.size_bytes, sha256: content.sha256]
+  record.putAll(identity)
+  return record
+}
+def outputArtifactSetSha256(List artifacts) {
+  def payload = artifacts.sort { a, b ->
+    def roleOrder = a.role.toString() <=> b.role.toString()
+    return roleOrder != 0 ? roleOrder :
+      a.relative_path.toString() <=> b.relative_path.toString()
+  }.collect { artifact ->
+    artifact.role + "\t" + artifact.relative_path + "\t" +
+      artifact.size_bytes + "\t" + artifact.sha256 + "\n"
+  }.join("").getBytes(java.nio.charset.StandardCharsets.UTF_8)
+  return sha256Bytes(payload)
+}
+def contentSnapshot(File source, String label) {
+  if (source == null || !source.isFile()) {
+    throw new IllegalArgumentException(label + " is not a regular file: " + source)
+  }
+  if (Files.isSymbolicLink(source.toPath())) {
+    throw new IllegalArgumentException(label + " must not be a symbolic link: " + source)
+  }
+  long sizeBefore = source.length()
+  long modifiedBefore = source.lastModified()
+  def digest = MessageDigest.getInstance("SHA-256")
+  long bytesRead = 0L
+  source.withInputStream { input ->
+    byte[] buffer = new byte[1024 * 1024]
+    int count
+    while ((count = input.read(buffer)) != -1) {
+      if (count > 0) {
+        digest.update(buffer, 0, count)
+        bytesRead += count
+      }
+    }
+  }
+  if (bytesRead != sizeBefore || source.length() != sizeBefore ||
+      source.lastModified() != modifiedBefore) {
+    throw new IllegalArgumentException(
+      label + " changed while its content identity was being read: " + source)
+  }
+  return [name: source.name, size_bytes: bytesRead,
+          sha256: digest.digest().collect { String.format("%02x", it & 0xff) }.join()]
+}
+def utf8Text(byte[] payload) {
+  String text = new String(payload, java.nio.charset.StandardCharsets.UTF_8)
+  return text.startsWith("\uFEFF") ? text.substring(1) : text
+}
+def requireClosedJsonObject(def value, Set<String> allowedKeys, String label) {
+  if (!(value instanceof Map)) {
+    throw new IllegalArgumentException(label + " must be a JSON object")
+  }
+  def actual = value.keySet().collect { it.toString() } as Set
+  if (actual != allowedKeys) {
+    def missing = (allowedKeys - actual).sort()
+    def unexpected = (actual - allowedKeys).sort()
+    throw new IllegalArgumentException(
+      label + " has the wrong fields; missing=" + missing + ", unexpected=" + unexpected)
+  }
+}
+def classCodeSource(String className) {
+  Class<?> runtimeClass
+  try {
+    runtimeClass = Class.forName(
+      className, false, Thread.currentThread().getContextClassLoader())
+  } catch (Throwable t) {
+    throw new IllegalArgumentException(
+      "Required StarDist runtime class is unavailable: " + className, t)
+  }
+  def location = runtimeClass.getProtectionDomain()?.getCodeSource()?.getLocation()
+  if (location == null || location.getProtocol() != "file") {
+    throw new IllegalArgumentException(
+      "Required StarDist runtime class has no local file code source: " + className)
+  }
+  File source
+  try {
+    source = new File(location.toURI()).getCanonicalFile()
+  } catch (Throwable t) {
+    throw new IllegalArgumentException(
+      "Cannot resolve code source for StarDist runtime class " + className, t)
+  }
+  if (!source.isFile()) {
+    throw new IllegalArgumentException(
+      "StarDist runtime class must be loaded from a sealed file, not " + source)
+  }
+  return [class_name: className, code_source_path: source.getAbsolutePath()]
+}
+def validateStarDistModelArchive(File model) {
+  def entryNames = [] as Set
+  int fileCount = 0
+  byte[] buffer = new byte[1024 * 1024]
+  try {
+    model.withInputStream { raw ->
+      def zip = new ZipInputStream(raw)
+      ZipEntry entry
+      while ((entry = zip.getNextEntry()) != null) {
+        String normalized = entry.name.replace('\\', '/')
+        if (normalized.isEmpty() || normalized.startsWith("/") ||
+            normalized ==~ /^[A-Za-z]:.*/ ||
+            normalized.tokenize('/').contains("..") ||
+            !entryNames.add(normalized)) {
+          throw new IllegalArgumentException(
+            "StarDist model archive contains an unsafe or duplicate entry: " + entry.name)
+        }
+        if (!entry.isDirectory()) fileCount++
+        while (zip.read(buffer) != -1) { /* stream every entry so CRC errors surface */ }
+        zip.closeEntry()
+      }
+      zip.close()
+    }
+  } catch (IllegalArgumentException t) {
+    throw t
+  } catch (Throwable t) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_MODEL_PATH is not a readable, intact ZIP archive: " + model, t)
+  }
+  if (fileCount == 0) {
+    throw new IllegalArgumentException("StarDist model archive contains no files: " + model)
+  }
+  return [archive_format: "zip", entry_count: entryNames.size(), file_count: fileCount]
+}
+def loadStarDistAuthority(String modelPath, String runtimeManifestPath) {
+  if (modelPath == null || modelPath.trim().isEmpty()) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_MODEL_PATH is required when IFQ_SEGMENTER=stardist")
+  }
+  if (runtimeManifestPath == null || runtimeManifestPath.trim().isEmpty()) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST is required when IFQ_SEGMENTER=stardist")
+  }
+  File model = new File(modelPath).toPath().toAbsolutePath().normalize().toFile()
+  if (!model.name.toLowerCase().endsWith(".zip")) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_MODEL_PATH must identify an exported StarDist .zip model: " + model)
+  }
+  def modelContent = contentSnapshot(model, "IFQ_STARDIST_MODEL_PATH")
+  def modelArchive = validateStarDistModelArchive(model)
+  if (contentSnapshot(model, "IFQ_STARDIST_MODEL_PATH") != modelContent) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_MODEL_PATH changed while its archive was being validated")
+  }
+
+  File manifestFile = new File(runtimeManifestPath).toPath().toAbsolutePath().normalize().toFile()
+  if (!manifestFile.name.toLowerCase().endsWith(".json")) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST must identify a .json file: " + manifestFile)
+  }
+  def manifestContentBefore = contentSnapshot(
+    manifestFile, "IFQ_STARDIST_RUNTIME_MANIFEST")
+  if (manifestContentBefore.size_bytes > 1024L * 1024L) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST exceeds the 1 MiB closed-manifest limit")
+  }
+  byte[] manifestBytes = manifestFile.bytes
+  def manifestContentAfter = contentSnapshot(
+    manifestFile, "IFQ_STARDIST_RUNTIME_MANIFEST")
+  if (manifestContentAfter != manifestContentBefore ||
+      sha256Bytes(manifestBytes) != manifestContentBefore.sha256) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST changed while it was being parsed")
+  }
+  String manifestText
+  try {
+    manifestText = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+      .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+      .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+      .decode(java.nio.ByteBuffer.wrap(manifestBytes)).toString()
+    if (manifestText.startsWith("\uFEFF")) manifestText = manifestText.substring(1)
+  } catch (Throwable t) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST is not strict UTF-8", t)
+  }
+  def doc
+  try {
+    doc = new JsonSlurper().parseText(manifestText)
+  } catch (Throwable t) {
+    throw new IllegalArgumentException(
+      "Cannot parse IFQ_STARDIST_RUNTIME_MANIFEST: " + t.message, t)
+  }
+  requireClosedJsonObject(
+    doc, ["schema_version", "profile_id", "artifacts"] as Set,
+    "StarDist runtime manifest")
+  if (doc.schema_version != "1.0.0") {
+    throw new IllegalArgumentException(
+      "StarDist runtime manifest schema_version must be 1.0.0")
+  }
+  if (!(doc.profile_id instanceof String) ||
+      !(doc.profile_id ==~ /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)) {
+    throw new IllegalArgumentException(
+      "StarDist runtime manifest profile_id must be a safe non-empty token")
+  }
+  if (!(doc.artifacts instanceof List) || doc.artifacts.size() < 4) {
+    throw new IllegalArgumentException(
+      "StarDist runtime manifest must contain at least four sealed artifacts")
+  }
+
+  def requiredClassesByRole = [
+    stardist_plugin: [
+      "de.csbdresden.stardist.StarDist2D",
+      "de.csbdresden.stardist.StarDist2DNMS"
+    ] as Set,
+    csbdeep_plugin: [
+      "de.csbdresden.csbdeep.commands.GenericNetwork"
+    ] as Set,
+    tensorflow_java: [
+      "org.tensorflow.Graph"
+    ] as Set,
+    tensorflow_native: [] as Set
+  ]
+  def seenRoles = [] as Set
+  def seenPaths = [] as Set
+  def artifacts = []
+  def classBindings = []
+  File manifestRoot = manifestFile.parentFile.toPath().toAbsolutePath().normalize().toFile()
+  doc.artifacts.eachWithIndex { artifact, index ->
+    String label = "StarDist runtime manifest artifacts[" + index + "]"
+    requireClosedJsonObject(
+      artifact, ["role", "path", "size_bytes", "sha256", "expected_classes"] as Set,
+      label)
+    if (!(artifact.role instanceof String) ||
+        !(artifact.role ==~ /[a-z][a-z0-9_]{0,63}/) ||
+        !seenRoles.add(artifact.role)) {
+      throw new IllegalArgumentException(
+        label + ".role must be a unique lowercase token")
+    }
+    if (!(artifact.path instanceof String) || artifact.path.trim().isEmpty()) {
+      throw new IllegalArgumentException(label + ".path must be a non-empty string")
+    }
+    File declared = new File(artifact.path)
+    File resolved
+    if (declared.isAbsolute()) {
+      resolved = declared.toPath().toAbsolutePath().normalize().toFile()
+    } else {
+      String normalized = artifact.path.replace('\\', '/')
+      if (normalized.startsWith("/") || normalized.tokenize('/').contains("..")) {
+        throw new IllegalArgumentException(
+          label + ".path must be absolute or safely relative to the manifest")
+      }
+      resolved = new File(manifestRoot, artifact.path).toPath().toAbsolutePath().normalize().toFile()
+      if (!resolved.toPath().startsWith(manifestRoot.toPath())) {
+        throw new IllegalArgumentException(label + ".path escapes the manifest folder")
+      }
+    }
+    if (!seenPaths.add(resolved.toPath().toRealPath())) {
+      throw new IllegalArgumentException(label + ".path repeats another artifact")
+    }
+    if (!(artifact.size_bytes instanceof Number) ||
+        !Double.isFinite((artifact.size_bytes as Number).doubleValue()) ||
+        (artifact.size_bytes as Number).longValue() < 1L ||
+        (artifact.size_bytes as Number).doubleValue() !=
+          (artifact.size_bytes as Number).longValue() as double) {
+      throw new IllegalArgumentException(label + ".size_bytes must be a positive integer")
+    }
+    if (!(artifact.sha256 instanceof String) ||
+        !(artifact.sha256 ==~ /[0-9a-f]{64}/)) {
+      throw new IllegalArgumentException(label + ".sha256 must be lowercase SHA-256")
+    }
+    if (!(artifact.expected_classes instanceof List) ||
+        artifact.expected_classes.any { !(it instanceof String) || it.trim().isEmpty() } ||
+        (artifact.expected_classes as Set).size() != artifact.expected_classes.size()) {
+      throw new IllegalArgumentException(
+        label + ".expected_classes must be a unique string array")
+    }
+    def requiredForRole = requiredClassesByRole[artifact.role]
+    if (requiredForRole != null &&
+        !(artifact.expected_classes as Set).containsAll(requiredForRole)) {
+      throw new IllegalArgumentException(
+        label + ".expected_classes is missing required classes for role " + artifact.role)
+    }
+    def actual = contentSnapshot(resolved, label + ".path")
+    if (actual.size_bytes != (artifact.size_bytes as Number).longValue() ||
+        actual.sha256 != artifact.sha256) {
+      throw new IllegalArgumentException(
+        label + " does not match its declared size/SHA-256: " + resolved)
+    }
+    artifact.expected_classes.each { className ->
+      def binding = classCodeSource(className)
+      if (!new File(binding.code_source_path).getCanonicalFile().equals(resolved)) {
+        throw new IllegalArgumentException(
+          "Class " + className + " was loaded from " + binding.code_source_path +
+          ", not its sealed manifest artifact " + resolved)
+      }
+      classBindings << binding
+    }
+    artifacts << [
+      role: artifact.role,
+      path: resolved.getAbsolutePath(),
+      expected_classes: artifact.expected_classes,
+      content: actual
+    ]
+  }
+  def missingRoles = (requiredClassesByRole.keySet() as Set) - seenRoles
+  if (!missingRoles.isEmpty()) {
+    throw new IllegalArgumentException(
+      "StarDist runtime manifest is missing required roles: " + missingRoles.sort())
+  }
+  return [
+    active: true,
+    authority: "explicit_model_and_closed_runtime_manifest_content_bound",
+    api_command: "de.csbdresden.stardist.StarDist2D",
+    model_choice: "Model (.zip) from File",
+    model_path: model.getAbsolutePath(),
+    model_content: modelContent,
+    model_archive: modelArchive,
+    runtime_manifest_path: manifestFile.getAbsolutePath(),
+    runtime_manifest_content: manifestContentBefore,
+    runtime_profile_id: doc.profile_id,
+    runtime_artifacts: artifacts,
+    class_bindings: classBindings
+  ]
+}
+def verifyStarDistAuthority(def authority) {
+  if (authority == null || authority.active != true) return true
+  if (contentSnapshot(new File(authority.model_path), "IFQ_STARDIST_MODEL_PATH") !=
+      authority.model_content) {
+    throw new IllegalArgumentException("IFQ_STARDIST_MODEL_PATH changed during analysis")
+  }
+  if (contentSnapshot(
+        new File(authority.runtime_manifest_path),
+        "IFQ_STARDIST_RUNTIME_MANIFEST") != authority.runtime_manifest_content) {
+    throw new IllegalArgumentException(
+      "IFQ_STARDIST_RUNTIME_MANIFEST changed during analysis")
+  }
+  authority.runtime_artifacts.each { artifact ->
+    if (contentSnapshot(
+          new File(artifact.path), "StarDist runtime artifact " + artifact.role) !=
+        artifact.content) {
+      throw new IllegalArgumentException(
+        "StarDist runtime artifact changed during analysis: " + artifact.role)
+    }
+    artifact.expected_classes.each { className ->
+      def binding = classCodeSource(className)
+      if (!new File(binding.code_source_path).getCanonicalFile().equals(
+            new File(artifact.path).getCanonicalFile())) {
+        throw new IllegalArgumentException(
+          "StarDist runtime class code source changed during analysis: " + className)
+      }
+    }
+  }
+  return true
+}
 def INPUT_DIR   = envOr("IFQ_INPUT_DIR", new File("ref_images").getAbsolutePath())
 def OUTPUT_DIR  = envOr("IFQ_OUTPUT_DIR", new File("analysis_output").getAbsolutePath())
+// The caller supplies the exact script path passed to Fiji. Requiring and
+// hashing that path makes direct confocal runs obey the same code-content
+// contract as sharded WSI runs; a packaged filename alone is not provenance.
+def ENGINE_SCRIPT_PATH = envOr("IFQ_ENGINE_SCRIPT_PATH", "").trim()
 def PANEL       = envOr("IFQ_PANEL", "T")
 // The registry is descriptive evidence and supplies safe role defaults. A
 // separate panel JSON maps the actual acquisition channels for a study. This
@@ -306,9 +703,11 @@ def USE_SAMPLESHEET = true
 // and TensorFlow has no windows-arm64 native build, so "stardist" cannot run on
 // this machine. Set back to "stardist" on an x86_64 Fiji with the update sites on.
 def SEGMENTER   = envOr("IFQ_SEGMENTER", "classic").toLowerCase() // "stardist" | "classic"
-def STARDIST_PROB = 0.50
-def STARDIST_NMS  = 0.40
-def STARDIST_TILES = 1          // raise (e.g. 4/9) for large images / low RAM
+def STARDIST_MODEL_PATH = envOr("IFQ_STARDIST_MODEL_PATH", "").trim()
+def STARDIST_RUNTIME_MANIFEST = envOr("IFQ_STARDIST_RUNTIME_MANIFEST", "").trim()
+def STARDIST_PROB = envDouble("IFQ_STARDIST_PROB", 0.50d)
+def STARDIST_NMS  = envDouble("IFQ_STARDIST_NMS", 0.40d)
+def STARDIST_TILES = envInt("IFQ_STARDIST_TILES", 1) // raise for large images / low RAM
 
 // --- Z handling ---
 // "layer_aware" is an additive 2.5D workflow. It preserves the legacy global
@@ -381,6 +780,15 @@ def requireFiniteNonnegative = { String name, double value, boolean allowZero = 
 }
 if (!(SEGMENTER in ["classic", "stardist"])) {
   failRun("IFQ_SEGMENTER must be classic or stardist; found '" + SEGMENTER + "'")
+}
+if (!Double.isFinite(STARDIST_PROB) || STARDIST_PROB < 0.0d || STARDIST_PROB > 1.0d) {
+  failRun("IFQ_STARDIST_PROB must be finite and between 0 and 1; found " + STARDIST_PROB)
+}
+if (!Double.isFinite(STARDIST_NMS) || STARDIST_NMS < 0.0d || STARDIST_NMS > 1.0d) {
+  failRun("IFQ_STARDIST_NMS must be finite and between 0 and 1; found " + STARDIST_NMS)
+}
+if (STARDIST_TILES < 1) {
+  failRun("IFQ_STARDIST_TILES must be a positive integer; found " + STARDIST_TILES)
 }
 if (!(PROJECTION in ["max", "sum", "avg", "single", "layer_aware"])) {
   failRun("IFQ_PROJECTION must be max, sum, avg, single, or layer_aware; found '" + PROJECTION + "'")
@@ -675,10 +1083,15 @@ def normalizeMarkerToken = { value ->
   value == null ? "" : value.toString().toUpperCase().replaceAll(/[^A-Z0-9]+/, "")
 }
 def markerRegistryFile = new File(MARKER_REGISTRY_PATH)
+def MARKER_REGISTRY_BYTES = markerRegistryFile.isFile() ? markerRegistryFile.bytes : null
+def MARKER_REGISTRY_SHA256 = MARKER_REGISTRY_BYTES != null ? sha256Bytes(MARKER_REGISTRY_BYTES) : null
 def MARKER_REGISTRY = [schema_version:"unavailable", markers:[:], research_profiles:[:]]
-if (markerRegistryFile.isFile()) {
+if (MARKER_REGISTRY_BYTES != null) {
   try {
-    def parsed = new JsonSlurper().parse(markerRegistryFile)
+    // Parse the exact byte snapshot whose digest is recorded. Reading the path
+    // once for hashing and again for parsing permits a concurrent replacement
+    // to make provenance describe bytes the run never consumed.
+    def parsed = new JsonSlurper().parseText(utf8Text(MARKER_REGISTRY_BYTES))
     if (!(parsed instanceof Map) || !(parsed.markers instanceof Map)) {
       throw new IllegalArgumentException("registry root must contain a 'markers' object")
     }
@@ -702,14 +1115,19 @@ def markerProfileFor = { marker -> markerProfileIndex[normalizeMarkerToken(marke
 // A custom panel file is opt-in. It can add panels but cannot silently replace
 // the validated built-ins. See config/custom_panels.example.json.
 def CUSTOM_PANEL_KEYS = []
+def panelConfigFile = (PANEL_CONFIG_PATH != null && !PANEL_CONFIG_PATH.trim().isEmpty()) ?
+                      new File(PANEL_CONFIG_PATH) : null
+def PANEL_CONFIG_BYTES = null
+def PANEL_CONFIG_SHA256 = null
 if (PANEL_CONFIG_PATH != null && !PANEL_CONFIG_PATH.trim().isEmpty()) {
-  def panelConfigFile = new File(PANEL_CONFIG_PATH)
   if (!panelConfigFile.isFile()) {
     failRun("IFQ_PANEL_CONFIG is not a file: " + panelConfigFile)
   }
+  PANEL_CONFIG_BYTES = panelConfigFile.bytes
+  PANEL_CONFIG_SHA256 = sha256Bytes(PANEL_CONFIG_BYTES)
   def customDoc
   try {
-    customDoc = new JsonSlurper().parse(panelConfigFile)
+    customDoc = new JsonSlurper().parseText(utf8Text(PANEL_CONFIG_BYTES))
   } catch (Throwable t) {
     failRun("Cannot parse IFQ_PANEL_CONFIG '" + panelConfigFile + "': " + t.message, t)
   }
@@ -991,11 +1409,14 @@ def captureVersions() {
   v.imagej_version = IJ.getFullVersion()
   try { v.bioformats_version = FormatTools.VERSION } catch (e) { v.bioformats_version = "unknown" }
   v.java_version = System.getProperty("java.version")
+  v.java_vendor = System.getProperty("java.vendor")
+  v.java_runtime = System.getProperty("java.runtime.name") + " " + System.getProperty("java.runtime.version")
+  v.java_vm = System.getProperty("java.vm.name") + " " + System.getProperty("java.vm.version")
   v.os = System.getProperty("os.name") + " " + System.getProperty("os.arch")
-  // StarDist / CSBDeep versions are not reliably queryable; record from the
-  // Updater if you need exact pins. Model + params below fully define the run.
-  v.stardist_note = "record CSBDeep+StarDist versions from Help>Update if needed"
-  v.timestamp = new Date().format("yyyy-MM-dd'T'HH:mm:ss")
+  // Version strings are descriptive only. When StarDist is active, exact model,
+  // plugin, TensorFlow Java, and native-runtime bytes are bound separately.
+  v.stardist_note = "exact StarDist runtime identity is recorded by content hash when active"
+  v.timestamp = java.time.Instant.now().toString()
   return v
 }
 
@@ -1873,6 +2294,186 @@ def resolveTissueRois(String imgPath, ImagePlus dapi, cfg) {
 }
 
 // Nucleus ROIs within a given tissue region.
+def starDistLabelDatasetToImageAndRois(def labelDataset, ImagePlus reference) {
+  if (labelDataset == null) {
+    throw new IllegalStateException(
+      "StarDist command returned no 'label' Dataset output")
+  }
+  if (labelDataset.numDimensions() != 2) {
+    throw new IllegalStateException(
+      "StarDist label output must be exactly 2D; found " +
+      labelDataset.numDimensions() + " dimensions")
+  }
+  int xDim = -1
+  int yDim = -1
+  for (int d = 0; d < labelDataset.numDimensions(); d++) {
+    String axis = labelDataset.axis(d).type().toString().toUpperCase()
+    if (axis == "X") xDim = d
+    if (axis == "Y") yDim = d
+  }
+  if (xDim < 0 || yDim < 0 ||
+      labelDataset.dimension(xDim) != reference.getWidth() ||
+      labelDataset.dimension(yDim) != reference.getHeight()) {
+    throw new IllegalStateException(
+      "StarDist label output axes/dimensions do not match the DAPI input")
+  }
+
+  int width = reference.getWidth()
+  int height = reference.getHeight()
+  short[] pixels = new short[width * height]
+  def labelIds = new java.util.TreeSet<Integer>()
+  def boundsByLabel = [:]
+  def randomAccess = labelDataset.getImgPlus().randomAccess()
+  for (int y = 0; y < height; y++) {
+    randomAccess.setPosition((long)y, yDim)
+    for (int x = 0; x < width; x++) {
+      randomAccess.setPosition((long)x, xDim)
+      double raw = randomAccess.get().getRealDouble()
+      if (!Double.isFinite(raw) || raw < 0.0d || raw > 65535.0d ||
+          Math.abs(raw - Math.rint(raw)) > 1.0e-9d) {
+        throw new IllegalStateException(
+          "StarDist label output must contain unsigned 16-bit integer labels; found " + raw)
+      }
+      int labelId = (int)Math.rint(raw)
+      pixels[y * width + x] = (short)(labelId & 0xffff)
+      if (labelId > 0) {
+        labelIds.add(labelId)
+        def bounds = boundsByLabel[labelId]
+        if (bounds == null) {
+          boundsByLabel[labelId] = [x, y, x, y] as int[]
+        } else {
+          if (x < bounds[0]) bounds[0] = x
+          if (y < bounds[1]) bounds[1] = y
+          if (x > bounds[2]) bounds[2] = x
+          if (y > bounds[3]) bounds[3] = y
+        }
+      }
+    }
+  }
+
+  def digest = MessageDigest.getInstance("SHA-256")
+  digest.update(("IFQ_STARDIST_LABEL_U16LE_ROW_MAJOR_V1\n" +
+                 width + "x" + height + "\n").getBytes(
+                   java.nio.charset.StandardCharsets.UTF_8))
+  byte[] digestBuffer = new byte[1024 * 1024]
+  int digestOffset = 0
+  pixels.each { encoded ->
+    int value = encoded & 0xffff
+    digestBuffer[digestOffset++] = (byte)(value & 0xff)
+    digestBuffer[digestOffset++] = (byte)((value >>> 8) & 0xff)
+    if (digestOffset == digestBuffer.length) {
+      digest.update(digestBuffer)
+      digestOffset = 0
+    }
+  }
+  if (digestOffset > 0) digest.update(digestBuffer, 0, digestOffset)
+  String pixelSha256 = digest.digest().collect {
+    String.format("%02x", it & 0xff)
+  }.join()
+
+  def rois = []
+  labelIds.each { labelId ->
+    int[] bounds = boundsByLabel[labelId] as int[]
+    int localWidth = bounds[2] - bounds[0] + 1
+    int localHeight = bounds[3] - bounds[1] + 1
+    def binary = new ByteProcessor(localWidth, localHeight)
+    for (int y = bounds[1]; y <= bounds[3]; y++) {
+      for (int x = bounds[0]; x <= bounds[2]; x++) {
+        if ((pixels[y * width + x] & 0xffff) == labelId) {
+          binary.set(x - bounds[0], y - bounds[1], 255)
+        }
+      }
+    }
+    binary.setThreshold(255, 255, ImageProcessor.NO_LUT_UPDATE)
+    Roi roi = new ThresholdToSelection().convert(binary)
+    if (roi == null) {
+      throw new IllegalStateException(
+        "Cannot convert StarDist label " + labelId + " to an ROI")
+    }
+    roi.setLocation(bounds[0], bounds[1])
+    roi.setName("stardist_label_" + labelId)
+    rois << roi
+  }
+  def labelImage = new ImagePlus(
+    "StarDist_instance_labels",
+    new ShortProcessor(width, height, pixels, null))
+  labelImage.setCalibration(reference.getCalibration())
+  return [
+    rois: rois,
+    labelMask: labelImage,
+    evidence: [
+      command_output: "label",
+      output_type: "Label Image",
+      pixel_encoding: "unsigned_16_bit_labels",
+      canonical_hash_encoding: "ifq_stardist_label_u16le_row_major_v1",
+      width_pixels: width,
+      height_pixels: height,
+      label_count: labelIds.size(),
+      canonical_pixel_sha256: pixelSha256
+    ]
+  ]
+}
+def runStarDistLabelCommand(ImagePlus input, cfg) {
+  verifyStarDistAuthority(cfg.stardistAuthority)
+  def context = IJ.runPlugIn("org.scijava.Context", "")
+  if (context == null) {
+    throw new IllegalStateException(
+      "Fiji's SciJava Context is unavailable; StarDist cannot run headlessly")
+  }
+  Class<?> commandServiceClass = Class.forName("org.scijava.command.CommandService")
+  Class<?> datasetServiceClass = Class.forName("net.imagej.DatasetService")
+  Class<?> adapterClass = Class.forName("net.imglib2.img.ImagePlusAdapter")
+  Class<?> commandClass = Class.forName("de.csbdresden.stardist.StarDist2D")
+  def commandService = context.getService(commandServiceClass)
+  def datasetService = context.getService(datasetServiceClass)
+  if (commandService == null || datasetService == null) {
+    throw new IllegalStateException(
+      "Fiji is missing the SciJava CommandService or ImageJ DatasetService")
+  }
+  def wrapMethod = adapterClass.methods.find { method ->
+    method.name == "wrapImgPlus" &&
+      java.lang.reflect.Modifier.isStatic(method.modifiers) &&
+      method.parameterTypes.length == 1 &&
+      method.parameterTypes[0].name == "ij.ImagePlus"
+  }
+  if (wrapMethod == null) {
+    throw new IllegalStateException(
+      "ImagePlusAdapter.wrapImgPlus(ImagePlus) is unavailable in this Fiji runtime")
+  }
+  def inputDataset = null
+  def labelDataset = null
+  try {
+    def imgPlus = wrapMethod.invoke(null, input)
+    inputDataset = datasetService.create(imgPlus)
+    def params = new LinkedHashMap<String, Object>()
+    params.put("input", inputDataset)
+    params.put("modelChoice", cfg.stardistAuthority.model_choice)
+    params.put("modelFile", new File(cfg.stardistAuthority.model_path))
+    params.put("normalizeInput", true)
+    params.put("percentileBottom", 1.0d)
+    params.put("percentileTop", 99.8d)
+    params.put("probThresh", cfg.prob as double)
+    params.put("nmsThresh", cfg.nms as double)
+    params.put("outputType", "Label Image")
+    params.put("nTiles", cfg.tiles as int)
+    params.put("excludeBoundary", 2)
+    params.put("roiPosition", "Automatic")
+    params.put("verbose", false)
+    params.put("showCsbdeepProgress", false)
+    params.put("showProbAndDist", false)
+    def module = commandService.run(commandClass, false, params).get()
+    labelDataset = module.getOutput("label")
+    def converted = starDistLabelDatasetToImageAndRois(labelDataset, input)
+    verifyStarDistAuthority(cfg.stardistAuthority)
+    return converted
+  } catch (Throwable t) {
+    throw new IllegalStateException(
+      "Headless StarDist label-image command failed: " + t.message, t)
+  } finally {
+    try { if (labelDataset != null) labelDataset.close() } catch (Throwable ignored) { }
+    try { if (inputDataset != null) inputDataset.close() } catch (Throwable ignored) { }
+  }
+}
 def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
   // Keep full-image coordinates. ImagePlus.duplicate() crops when an ROI is
   // active; inheriting that cropped coordinate system made non-whole-field ROI
@@ -1881,25 +2482,35 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
                                  dapi.getProcessor().duplicate())
   crop.setCalibration(dapi.getCalibration())
   if (cfg.segmenter == "stardist") {
-    // StarDist's ROI Manager output is interactive-only. Keep it isolated from
-    // the classic path so classic segmentation remains fully headless-safe.
-    def rm = ij.plugin.frame.RoiManager.getInstance() ?: new ij.plugin.frame.RoiManager()
-    rm.reset()
-    crop.setTitle("DAPI_seg")
-    crop.show()   // StarDist is happiest with a shown image (interactive mode)
-    IJ.run(crop, "Command From Macro",
-      "command=[de.csbdresden.stardist.StarDist2D], " +
-      "args=['input':'DAPI_seg', 'modelChoice':'Versatile (fluorescent nuclei)', " +
-      "'normalizeInput':'true', 'percentileBottom':'1.0', 'percentileTop':'99.8', " +
-      "'probThresh':'" + cfg.prob + "', 'nmsThresh':'" + cfg.nms + "', " +
-      "'outputType':'ROI Manager', 'nTiles':'" + cfg.tiles + "', " +
-      "'excludeBoundary':'2', 'roiPosition':'Automatic', 'verbose':'false', " +
-      "'showCsbdeepProgress':'false', 'showProbAndDist':'false'], process=[false]")
-    def rois = rm.getRoisAsArray().collect { it }
-    crop.changes = false; crop.close()
-    // keep only nuclei whose centroid lies inside the region
-    def included = rois.findAll { region.contains((int)it.getBounds().getCenterX(), (int)it.getBounds().getCenterY()) }
-    return [included: included, rejected: []]
+    // Invoke the official SciJava command directly and consume its declared
+    // Dataset `label` output. No image window or global ROI Manager participates.
+    def commandOutput = runStarDistLabelCommand(crop, cfg)
+    def rois = commandOutput.rois
+    crop.changes = false
+    crop.close()
+    // Apply the same calibrated size and image-edge acceptance rules as the
+    // classic path. StarDist runs over the complete image for each analysis
+    // region, so detections whose centroids lie outside this region are not
+    // candidates for this region and must not contaminate its rejection QC.
+    def included = []
+    def rejected = []
+    rois.each { r ->
+      def b = r.getBounds()
+      double area = measureRoi(dapi, r).area
+      boolean inRegion = region.contains((int)b.getCenterX(), (int)b.getCenterY())
+      boolean edge = b.x <= 0 || b.y <= 0 ||
+                     b.x + b.width >= dapi.getWidth() ||
+                     b.y + b.height >= dapi.getHeight()
+      if (inRegion) {
+        String reason = edge ? "image_edge" :
+                        (area < cfg.minNucArea ? "area_below_minimum" : null)
+        if (reason == null) included << r
+        else rejected << [roi:r, reason:reason, area_um2:area]
+      }
+    }
+    return [included: included, rejected: rejected, candidateMask: null,
+            labelMask: commandOutput.labelMask,
+            labelEvidence: commandOutput.evidence]
   } else {
     // Classic/local-threshold watershed fallback. The local mode is intended
     // for uneven DAPI illumination and is fully recorded in params.json.
@@ -1956,7 +2567,8 @@ def segmentNuclei(ImagePlus dapi, Roi region, cfg) {
 //  5. PER-IMAGE PROCESSING
 // ============================================================================
 
-def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg, outDir) {
+def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg,
+                 outDir, sourceContent) {
   IJ.log("---- " + new File(imgPath).name + "  [panel " + panelKey + "] ----")
   def sourceStem = new File(imgPath).name.replaceFirst(/\.[^.]+$/, "")
   def imgOut = ensureDir(outDir + "/" + outputKey)
@@ -1983,6 +2595,7 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   def displaySettings = [:]
   def areaMasks = [:]
   def transientImages = []
+  def starDistLabelChecks = []
   try {
   raw = bfOpen(imgPath)
   Calibration cal = raw.getCalibration()
@@ -2311,6 +2924,23 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
 
     // ---- Nuclei -> cells ----
     def segmentation = segmentNuclei(dapi, region, cfg)
+    def regionStarDistEvidence = null
+    if (segmentation.labelMask != null) {
+      String labelFilename = fileKey + "__" + regFileToken +
+                             "__StarDist_instance_labels.tif"
+      File labelFile = new File(imgOut, labelFilename)
+      IJ.saveAs(segmentation.labelMask, "Tiff", labelFile.getAbsolutePath())
+      def labelContent = contentSnapshot(labelFile, "StarDist label output")
+      regionStarDistEvidence = new LinkedHashMap(segmentation.labelEvidence)
+      regionStarDistEvidence.region = regName
+      regionStarDistEvidence.output_relative_path = outputKey + "/" + labelFilename
+      regionStarDistEvidence.output_content = labelContent
+      regionStarDistEvidence.output_content_verified_at_publication = true
+      starDistLabelChecks << [file: labelFile, content: labelContent,
+                              evidence: regionStarDistEvidence]
+      segmentation.labelMask.close()
+      segmentation.labelMask = null
+    }
     if (segmentation.candidateMask != null) transientImages << segmentation.candidateMask
     def nuclei = segmentation.included
     if (nuclei.size() < cfg.minIncludedNuclei) {
@@ -2734,6 +3364,12 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                   n_rejected_at_image_edge: rejectedAtEdge,
                   n_rejected_by_particle_filter: rejectedByParticle,
                   n_nucleus_candidates_total: nucleusCandidateTotal,
+                  stardist_label_count:
+                    (regionStarDistEvidence != null ?
+                      regionStarDistEvidence.label_count : ""),
+                  stardist_label_canonical_pixel_sha256:
+                    (regionStarDistEvidence != null ?
+                      regionStarDistEvidence.canonical_pixel_sha256 : ""),
                   nucleus_candidate_acceptance_fraction: (nucleusCandidateTotal > 0 ? nuclei.size() / (double)nucleusCandidateTotal : 0),
                   nucleus_candidate_rejection_fraction: (nucleusCandidateTotal > 0 ? rejectedNuclei.size() / (double)nucleusCandidateTotal : 0),
                   rejected_below_min_fraction_of_rejected: (!rejectedNuclei.isEmpty() ? rejectedBelowMin / (double)rejectedNuclei.size() : 0),
@@ -2896,6 +3532,16 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
     }
   }
 
+  // Bind the exact published StarDist TIFFs after all regional analysis and
+  // immediately before the per-image provenance record is written.
+  starDistLabelChecks.each { check ->
+    if (contentSnapshot(check.file, "StarDist label output") != check.content) {
+      throw new IllegalStateException(
+        "StarDist label output changed before params publication: " + check.file)
+    }
+    check.evidence.output_content_verified_before_params = true
+  }
+
   // Save morphology-specific binary masks with names that describe the unit.
   panelDef.channels.findAll { it.areaMarker }.each { c ->
     def mask = areaMasks[c.marker]
@@ -2910,6 +3556,9 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   // per-image params/provenance
   def params = [
     image: new File(imgPath).name, output_key: outputKey, channel_signature: channelSignature,
+    source_content: sourceContent,
+    engine_script: cfg.engineScript,
+    resolved_config_sha256: cfg.resolvedConfigSha256,
     panel: panelKey, panel_label: panelDef.label,
     calibration: [ pixel_width_um: cal.pixelWidth, pixel_height_um: cal.pixelHeight,
                    pixel_depth_um: cal.pixelDepth, unit: cal.getUnit(),
@@ -2938,7 +3587,24 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
       resolved_channels: displaySettings,
       warning: "Enhanced PNGs and enhanced QC backgrounds must not be used for intensity measurement or threshold calibration."
     ],
-    segmenter: cfg.segmenter, stardist_prob: cfg.prob, stardist_nms: cfg.nms, stardist_tiles: cfg.tiles,
+    segmenter: cfg.segmenter,
+    stardist_model_choice: cfg.stardistModelChoice,
+    stardist_model_sha256: cfg.stardistModelSha256,
+    stardist_model_authority: cfg.stardistModelAuthority,
+    stardist_prob: cfg.prob, stardist_nms: cfg.nms, stardist_tiles: cfg.tiles,
+    stardist_runtime: [
+      active: cfg.stardistAuthority.active,
+      authority: cfg.stardistAuthority.authority,
+      api_command: cfg.stardistAuthority.api_command,
+      model_choice: cfg.stardistAuthority.model_choice,
+      model_content: cfg.stardistAuthority.model_content,
+      model_archive: cfg.stardistAuthority.model_archive,
+      runtime_manifest_content: cfg.stardistAuthority.runtime_manifest_content,
+      runtime_profile_id: cfg.stardistAuthority.runtime_profile_id,
+      runtime_artifacts: cfg.stardistAuthority.runtime_artifacts,
+      class_bindings: cfg.stardistAuthority.class_bindings,
+      label_outputs: starDistLabelChecks.collect { it.evidence }
+    ],
     dapi_preprocessing: [ method: cfg.dapiMethod,
                           method_source: cfg.dapiMethodSource,
                           background_radius_um: cfg.dapiBackgroundRadiusUm,
@@ -2973,9 +3639,15 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                           compound_class_policy: "context-unresolved marker positives cannot authorize compound lineage/state classes" ],
     morphology_rules: cfg.morphologyRules,
     role_morphology_defaults: cfg.roleMorphologyDefaults,
-    marker_registry: [path:cfg.markerRegistryPath, schema_version:cfg.markerRegistrySchema],
+    marker_registry: [path:cfg.markerRegistryPath, schema_version:cfg.markerRegistrySchema,
+                      status:cfg.markerRegistryStatus, sha256:cfg.markerRegistrySha256],
     custom_panel_config: cfg.panelConfigPath,
+    custom_panel_config_status: cfg.panelConfigStatus,
+    custom_panel_config_sha256: cfg.panelConfigSha256,
     custom_panel_keys: cfg.customPanelKeys,
+    routing_input_hashes: [samplesheet_sha256:cfg.samplesheetSha256,
+                           panel_map_sha256:cfg.panelMapSha256,
+                           canonical_manifest_sha256:cfg.canonicalManifestSha256],
     compartment_mode: cfg.compartmentMode,
     whole_field_compartment: cfg.wholeFieldCompartment,
     minimum_ring_positive_fraction: cfg.minRingPosFraction,
@@ -2986,8 +3658,10 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
                              exclude_image_edge: true],
     channel_map: panelDef.channels
   ]
-  new File(imgOut, fileKey + "__params.json").setText(
-    JsonOutput.prettyPrint(JsonOutput.toJson(params)), "UTF-8")
+  atomicWriteBytes(
+    new File(imgOut, fileKey + "__params.json"),
+    JsonOutput.prettyPrint(JsonOutput.toJson(params))
+      .getBytes(java.nio.charset.StandardCharsets.UTF_8))
   writeCsv(zProfileRows, imgOut.getAbsolutePath() + "/" +
            fileKey + "__z_plane_profile.csv")
 
@@ -2995,7 +3669,8 @@ def processImage(String imgPath, String outputKey, panelKey, panelDef, meta, cfg
   writeCsv(cellRows, imgOut.getAbsolutePath() + "/" + fileKey + "__cells.csv")
 
   return [summary: summaryRows, cells: cellRows.size(), tissue_source: tissue.source,
-          channel_signature: channelSignature]
+          channel_signature: channelSignature,
+          params_relative_path: outputKey + "/" + fileKey + "__params.json"]
   } finally {
     // Z projection creates new images while leaving the split stacks open.
     // Close every object by identity on success, early return, or exception so
@@ -3307,7 +3982,10 @@ def saveLabelMask(ImagePlus ref, nucRois, String path) {
 }
 
 def writeCsv(rows, String path) {
-  if (rows == null || rows.isEmpty()) { new File(path).setText("", "UTF-8"); return }
+  if (rows == null || rows.isEmpty()) {
+    atomicWriteBytes(new File(path), new byte[0])
+    return
+  }
   def cols = [] as LinkedHashSet
   rows.each { r -> cols.addAll(r.keySet()) }
   cols = cols as List
@@ -3321,7 +3999,8 @@ def writeCsv(rows, String path) {
         "\"" + s.replace("\"", "\"\"") + "\"" : s
     }.join(",")).append("\n")
   }
-  new File(path).setText(sb.toString(), "UTF-8")
+  atomicWriteBytes(
+    new File(path), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
 }
 
 def xlsxXmlEscape = { value ->
@@ -3417,7 +4096,8 @@ def xlsxSheetXml = { sheet ->
 }
 
 def writeXlsxWorkbook = { List sheets, String path ->
-  def zip = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(path)))
+  def payload = new ByteArrayOutputStream()
+  def zip = new ZipOutputStream(new BufferedOutputStream(payload))
   def putText = { String entryName, String text ->
     zip.putNextEntry(new ZipEntry(entryName))
     zip.write(text.getBytes("UTF-8"))
@@ -3489,6 +4169,7 @@ def writeXlsxWorkbook = { List sheets, String path ->
   } finally {
     zip.close()
   }
+  atomicWriteBytes(new File(path), payload.toByteArray())
 }
 
 def buildPerImagePositiveQuantification = { summaryRows ->
@@ -3592,7 +4273,8 @@ def parseMeta(String fname, sheet, defaultPanel, String sourceContext = "", Stri
 def loadSamplesheet(String dir) {
   def f = new File(dir, "samplesheet.csv")
   if (!f.exists()) return null
-  def lines = f.readLines()
+  byte[] sourceBytes = f.bytes
+  def lines = utf8Text(sourceBytes).readLines()
   if (lines.isEmpty()) return null
   def header = parseCsvLine(lines[0]).collect { it.trim() }
   if (!header.isEmpty()) header[0] = header[0].replace("\uFEFF", "")
@@ -3628,7 +4310,9 @@ def loadSamplesheet(String dir) {
       }
     }
   }
-  return [byFilename:byFilename, byRelative:byRelative, ambiguousFilenames:ambiguousFilenames]
+  return [source:f, sourceBytes:sourceBytes, sourceSha256:sha256Bytes(sourceBytes),
+          byFilename:byFilename, byRelative:byRelative,
+          ambiguousFilenames:ambiguousFilenames]
 }
 
 def loadPanelMap(String path) {
@@ -3637,7 +4321,8 @@ def loadPanelMap(String path) {
   if (!f.isFile()) {
     throw new IllegalArgumentException("IFQ_PANEL_MAP_PATH is not a file: " + path)
   }
-  def lines = f.readLines("UTF-8")
+  byte[] sourceBytes = f.bytes
+  def lines = utf8Text(sourceBytes).readLines()
   if (lines.isEmpty()) {
     throw new IllegalArgumentException("Panel map is empty: " + path)
   }
@@ -3668,7 +4353,8 @@ def loadPanelMap(String path) {
   if (byRelative.isEmpty()) {
     throw new IllegalArgumentException("Panel map contains no image assignments: " + path)
   }
-  return [source:f, byRelative:byRelative]
+  return [source:f, sourceBytes:sourceBytes, sourceSha256:sha256Bytes(sourceBytes),
+          byRelative:byRelative]
 }
 def loadCanonicalManifest(String path) {
   if (path == null || path.trim().isEmpty()) return null
@@ -3677,7 +4363,8 @@ def loadCanonicalManifest(String path) {
     throw new IllegalArgumentException(
       "IFQ_CANONICAL_MANIFEST_PATH is not a file: " + path)
   }
-  def lines = f.readLines("UTF-8")
+  byte[] sourceBytes = f.bytes
+  def lines = utf8Text(sourceBytes).readLines()
   if (lines.isEmpty()) {
     throw new IllegalArgumentException("Canonical manifest is empty: " + path)
   }
@@ -3710,7 +4397,8 @@ def loadCanonicalManifest(String path) {
     throw new IllegalArgumentException(
       "Canonical manifest contains no image assignments: " + path)
   }
-  return [source:f, byRelative:byRelative]
+  return [source:f, sourceBytes:sourceBytes, sourceSha256:sha256Bytes(sourceBytes),
+          byRelative:byRelative]
 }
 
 // ============================================================================
@@ -3731,7 +4419,63 @@ if (!ALLOW_NONEMPTY_OUTPUT && existingOutputEntries.length > 0) {
     ". Use a new run directory to prevent stale masks/cell tables, or explicitly set " +
     "IFQ_ALLOW_NONEMPTY_OUTPUT=true after reviewing the existing contents.")
 }
-def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles: STARDIST_TILES,
+// An explicitly allowed rerun must never leave an earlier complete manifest at
+// the canonical name while new artifacts are being produced. Preserve it as a
+// recoverable stale record before the first analytical write.
+def priorRunManifest = new File(outputRoot, "run_manifest.json")
+if (priorRunManifest.isFile()) {
+  try {
+    def priorContent = contentSnapshot(priorRunManifest, "previous run manifest")
+    def staleManifest = new File(
+      outputRoot,
+      "run_manifest.STALE." + priorContent.sha256.substring(0, 12) + "." +
+        System.currentTimeMillis() + ".json")
+    Files.move(
+      priorRunManifest.toPath(), staleManifest.toPath(),
+      StandardCopyOption.ATOMIC_MOVE)
+    IJ.log("Quarantined previous canonical run manifest as " + staleManifest.name)
+  } catch (Throwable t) {
+    failRun("Cannot quarantine the previous run_manifest.json: " + t.message, t)
+  }
+}
+def engineScriptFile = ENGINE_SCRIPT_PATH.isEmpty() ? null : new File(ENGINE_SCRIPT_PATH)
+def engineScriptSnapshot
+try {
+  if (engineScriptFile == null) {
+    failRun("IFQ_ENGINE_SCRIPT_PATH is required so the executed analysis code bytes are content-bound")
+  }
+  engineScriptSnapshot = contentSnapshot(engineScriptFile, "IFQ_ENGINE_SCRIPT_PATH")
+} catch (Throwable t) {
+  failRun("Cannot bind the executed engine script: " + t.message, t)
+}
+def stardistAuthority = [
+  active: false,
+  authority: (SEGMENTER == "stardist" && DISPLAY_PREVIEW_ONLY) ?
+    "not_run_display_preview_only" : "not_applicable_classic",
+  api_command: null,
+  model_choice: null,
+  model_content: null,
+  model_archive: null,
+  runtime_manifest_content: null,
+  runtime_profile_id: null,
+  runtime_artifacts: [],
+  class_bindings: []
+]
+if (SEGMENTER == "stardist" && !DISPLAY_PREVIEW_ONLY) {
+  try {
+    stardistAuthority = loadStarDistAuthority(
+      STARDIST_MODEL_PATH, STARDIST_RUNTIME_MANIFEST)
+  } catch (Throwable t) {
+    failRun("Cannot activate the sealed StarDist route: " + t.message, t)
+  }
+}
+def cfg = [ segmenter: SEGMENTER,
+           stardistModelChoice: stardistAuthority.model_choice,
+           engineScript: engineScriptSnapshot,
+           stardistAuthority: stardistAuthority,
+           stardistModelSha256: stardistAuthority.model_content?.sha256,
+           stardistModelAuthority: stardistAuthority.authority,
+           prob: STARDIST_PROB, nms: STARDIST_NMS, tiles: STARDIST_TILES,
            dapiMethod: EFFECTIVE_DAPI_METHOD,
            dapiMethodSource: DAPI_METHOD_EXPLICIT ? "explicit_environment" :
                              (PROJECTION == "layer_aware" ? "layer_aware_safe_default" : "legacy_default"),
@@ -3756,9 +4500,14 @@ def cfg = [ segmenter: SEGMENTER, prob: STARDIST_PROB, nms: STARDIST_NMS, tiles:
            sensitivity: POS_SENSITIVITY, fixedThresholds: FIXED_POS_THRESHOLDS,
            morphologyPrimary: MORPHOLOGY_PRIMARY, morphologyRules: MORPHOLOGY_RULES,
            roleMorphologyDefaults: ROLE_MORPHOLOGY_DEFAULTS,
-           markerRegistryPath: markerRegistryFile.isFile() ? markerRegistryFile.getAbsolutePath() : "unavailable",
+           markerRegistryPath: MARKER_REGISTRY_BYTES != null ? markerRegistryFile.getAbsolutePath() : "unavailable",
+           markerRegistrySha256: MARKER_REGISTRY_SHA256,
+           markerRegistryStatus: MARKER_REGISTRY_BYTES != null ? "external_file_bound" : "not_used_unavailable",
            markerRegistrySchema: MARKER_REGISTRY.schema_version ?: "unavailable",
-           panelConfigPath: PANEL_CONFIG_PATH ?: "built_in_only", customPanelKeys: CUSTOM_PANEL_KEYS,
+           panelConfigPath: PANEL_CONFIG_PATH ?: "built_in_only",
+           panelConfigSha256: PANEL_CONFIG_SHA256,
+           panelConfigStatus: panelConfigFile != null ? "external_file_bound" : "built_in_only",
+           customPanelKeys: CUSTOM_PANEL_KEYS,
            panelMapMode: PANEL_MAP_PATH ? "per_image_relative_path" : "single_panel_or_samplesheet",
            canonicalManifestPath: CANONICAL_MANIFEST_PATH ?: null,
            canonicalManifestMode: CANONICAL_MANIFEST_PATH ? "allowlist" : "discovery",
@@ -3795,6 +4544,18 @@ catch (Throwable t) { failRun("Cannot load per-image panel map: " + t.message, t
 def canonicalManifest
 try { canonicalManifest = loadCanonicalManifest(CANONICAL_MANIFEST_PATH) }
 catch (Throwable t) { failRun("Cannot load canonical field manifest: " + t.message, t) }
+
+// Bind every external routing/identity file that influenced this run. Paths
+// remain useful locally, while the byte hashes are the portable authority.
+cfg.samplesheetSha256 = sheet != null ? sheet.sourceSha256 : null
+cfg.panelMapSha256 = panelMap != null ? panelMap.sourceSha256 : null
+cfg.canonicalManifestSha256 = canonicalManifest != null ?
+                              canonicalManifest.sourceSha256 : null
+// This digest seals the exact configuration object used by processImage.
+// Compute it before adding the digest field itself so it is non-recursive and
+// can be reconciled independently by downstream record publication.
+cfg.resolvedConfigSha256 = sha256Bytes(
+  JsonOutput.toJson(cfg).getBytes(java.nio.charset.StandardCharsets.UTF_8))
 
 
 def listed = []
@@ -3836,9 +4597,15 @@ if (canonicalManifest != null) {
   IJ.log("Canonical manifest selected " + files.size() + " intended image(s); " +
          canonicalExcludedFiles.size() + " discovery candidate(s) retained as audit-only skips.")
 }
-if (MAX_IMAGES > 0) files = files.take(MAX_IMAGES)
+def intendedAnalyticalInputCount = files.size()
+def maxImagesExcludedFiles = []
+if (MAX_IMAGES > 0 && files.size() > MAX_IMAGES) {
+  maxImagesExcludedFiles = files.drop(MAX_IMAGES)
+  files = files.take(MAX_IMAGES)
+}
 IJ.log("Found " + files.size() + " analytical image(s); deliberately skipped " +
-       deliberatelySkippedFiles.size() + " non-analysis acquisition(s).")
+       deliberatelySkippedFiles.size() + " non-analysis acquisition(s); " +
+       maxImagesExcludedFiles.size() + " excluded by IFQ_MAX_IMAGES.")
 deliberatelySkippedFiles.each { f ->
   IJ.log("[IFQ_SKIP] " + f.name + " | non_analytical_map_acquisition")
 }
@@ -3866,15 +4633,17 @@ if (panelMap != null) {
       ". Available panels: " + PANELS.keySet().sort())
   }
   if (!DISPLAY_PREVIEW_ONLY) {
-    new File(OUTPUT_DIR, "auto_panel_assignments.csv").bytes = panelMap.source.bytes
+    new File(OUTPUT_DIR, "auto_panel_assignments.csv").bytes = panelMap.sourceBytes
   }
 }
 if (canonicalManifest != null && !DISPLAY_PREVIEW_ONLY) {
-  new File(OUTPUT_DIR, "canonical_field_manifest.csv").bytes = canonicalManifest.source.bytes
+  new File(OUTPUT_DIR, "canonical_field_manifest.csv").bytes = canonicalManifest.sourceBytes
 }
 
 def masterSummary = []
-def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: cfg,
+def manifest = [ run_manifest_schema_version: "2.0.0",
+                  publication_contract: "sealed_outputs_manifest_published_last",
+                  run_timestamp: versions.timestamp, versions: versions, config: cfg,
                   input_dir: INPUT_DIR, output_dir: OUTPUT_DIR, recursive: RECURSIVE,
                   include_regex: INCLUDE_REGEX, max_images: MAX_IMAGES,
                   per_image_panel_routing: panelMap != null,
@@ -3882,12 +4651,16 @@ def manifest = [ run_timestamp: versions.timestamp, versions: versions, config: 
                     "auto_panel_assignments.csv" : null,
                   matched_input_count: matchedFiles.size(),
                   analytical_input_count: files.size(),
+                  intended_analytical_input_count: intendedAnalyticalInputCount,
+                  analytical_coverage_complete: maxImagesExcludedFiles.isEmpty(),
+                  max_images_excluded_count: maxImagesExcludedFiles.size(),
                   canonical_manifest_path: canonicalManifest != null ?
                     canonicalManifest.source.getAbsolutePath() : null,
-                  canonical_input_count: canonicalManifest != null ? files.size() : null,
+                  canonical_input_count: canonicalManifest != null ? intendedAnalyticalInputCount : null,
                   canonical_excluded_count: canonicalExcludedFiles.size(),
                   status: "running", success_count: 0,
-                  skipped_count: deliberatelySkippedFiles.size() + canonicalExcludedFiles.size(),
+                  skipped_count: deliberatelySkippedFiles.size() + canonicalExcludedFiles.size() +
+                                 maxImagesExcludedFiles.size(),
                   failure_count: 0, output_failure_count: 0, images: [] ]
 deliberatelySkippedFiles.each { f ->
   def relativePath = inDir.toPath().relativize(f.toPath()).toString()
@@ -3905,6 +4678,14 @@ canonicalExcludedFiles.each { f ->
     message: "Discovery candidate excluded by reviewer-approved canonical field manifest"
   ]
 }
+maxImagesExcludedFiles.each { f ->
+  def relativePath = inDir.toPath().relativize(f.toPath()).toString()
+  manifest.images << [
+    file: f.name, relative_path: relativePath, output_key: null, panel: null,
+    status: "skipped", skip_reason: "max_images_limit",
+    message: "Analytical candidate excluded by IFQ_MAX_IMAGES; run coverage is incomplete"
+  ]
+}
 
 def safeToken = { value ->
   def s = (value == null || value.toString().trim().isEmpty()) ? "NA" : value.toString().trim()
@@ -3920,6 +4701,7 @@ files.eachWithIndex { f, fileIndex ->
   def panelKey = PANEL
   def outputKey = null
   try {
+    def sourceContentBefore = contentSnapshot(f, "analytical input")
     def m = parseMeta(f.name, sheet, PANEL, f.parentFile.absolutePath, relativePath)
     String normalizedRelativePath = relativePath.replace('\\', '/')
     String requestedPanel = panelMap != null ?
@@ -3945,11 +4727,20 @@ files.eachWithIndex { f, fileIndex ->
       }
     }
     usedOutputKeys << outputKey
-    def res = processImage(f.getAbsolutePath(), outputKey, panelKey, panelDef, m, cfg, OUTPUT_DIR)
+    def res = processImage(f.getAbsolutePath(), outputKey, panelKey, panelDef, m, cfg,
+                           OUTPUT_DIR, sourceContentBefore)
+    def sourceContentAfter = contentSnapshot(f, "analytical input")
+    if (sourceContentAfter != sourceContentBefore) {
+      throw new IllegalArgumentException(
+        "Analytical input changed while it was being processed: " + relativePath)
+    }
     masterSummary.addAll(res.summary)
     manifest.success_count = manifest.success_count + 1
     manifest.images << [ file: f.name, relative_path: relativePath, output_key: outputKey,
                          panel: panelKey, status: "success", channel_signature: res.channel_signature,
+                         params_relative_path: res.params_relative_path,
+                         source_content: sourceContentBefore,
+                         source_content_verified_before_and_after: true,
                          tissue_source: res.tissue_source, n_cells: res.cells ]
   } catch (Throwable t) {
     IJ.log("  ERROR on " + f.name + ": " + t)
@@ -3974,6 +4765,26 @@ if (DISPLAY_PREVIEW_ONLY) {
 }
 
 // master summary + manifest
+try {
+  verifyStarDistAuthority(stardistAuthority)
+} catch (Throwable t) {
+  failRun("Cannot revalidate sealed StarDist authority after analysis: " + t.message, t)
+}
+manifest.stardist_authority_verified_before_and_after =
+  stardistAuthority.active == true
+def engineScriptAfter
+try {
+  engineScriptAfter = contentSnapshot(engineScriptFile, "IFQ_ENGINE_SCRIPT_PATH")
+} catch (Throwable t) {
+  failRun("Cannot revalidate the executed engine script after analysis: " + t.message, t)
+}
+if (engineScriptAfter != engineScriptSnapshot) {
+  failRun("IFQ_ENGINE_SCRIPT_PATH changed while the analysis was running")
+}
+manifest.engine_script = engineScriptSnapshot
+manifest.engine_script_path = engineScriptFile.getCanonicalPath()
+manifest.engine_script_verified_before_and_after = true
+manifest.input_content_authority = "sha256_streamed_bytes_verified_before_and_after_analysis"
 writeCsv(masterSummary, OUTPUT_DIR + "/run_summary.csv")
 def finalQuantification = buildPerImagePositiveQuantification(masterSummary)
 def skippedInputs = manifest.images.findAll { it.status == "skipped" }.collect { record ->
@@ -4004,10 +4815,86 @@ try {
   manifest.summary_workbook_error = t.getMessage()
   IJ.log("ERROR writing run_summary.xlsx: " + t)
 }
-manifest.status = failures.isEmpty() && workbookFailure == null ?
-  "complete" : (manifest.success_count > 0 ? "partial_failure" : "failed")
-new File(OUTPUT_DIR, "run_manifest.json").setText(
-  JsonOutput.prettyPrint(JsonOutput.toJson(manifest)), "UTF-8")
+manifest.status = !failures.isEmpty() || workbookFailure != null ?
+  (manifest.success_count > 0 ? "partial_failure" : "failed") :
+  (!maxImagesExcludedFiles.isEmpty() ? "incomplete_max_images_limit" : "complete")
+
+// Seal the exact publication set only after every canonical output is closed.
+// Re-read raw, model/runtime, and engine bytes again at this boundary; the
+// manifest is then the final canonical filename published for the run.
+try {
+  verifyStarDistAuthority(stardistAuthority)
+  if (contentSnapshot(engineScriptFile, "IFQ_ENGINE_SCRIPT_PATH") !=
+      engineScriptSnapshot) {
+    throw new IllegalArgumentException(
+      "IFQ_ENGINE_SCRIPT_PATH changed before run-manifest publication")
+  }
+  File canonicalInputRoot = inDir.getCanonicalFile()
+  manifest.images.findAll { it.status == "success" }.each { imageRecord ->
+    File currentSource = new File(canonicalInputRoot, imageRecord.relative_path)
+      .getCanonicalFile()
+    if (!currentSource.toPath().startsWith(canonicalInputRoot.toPath()) ||
+        contentSnapshot(currentSource, "analytical input at manifest publication") !=
+          imageRecord.source_content) {
+      throw new IllegalArgumentException(
+        "Analytical input identity drift before run-manifest publication: " +
+        imageRecord.relative_path)
+    }
+  }
+
+  def outputArtifacts = []
+  def summaryArtifact = outputArtifactRecord(
+    outputRoot, "run_summary", "run_summary.csv")
+  outputArtifacts << summaryArtifact
+  manifest.run_summary_content = [name: "run_summary.csv",
+                                  size_bytes: summaryArtifact.size_bytes,
+                                  sha256: summaryArtifact.sha256]
+
+  manifest.images.findAll { it.status == "success" }
+    .sort { it.output_key.toString() }.each { imageRecord ->
+      def paramsArtifact = outputArtifactRecord(
+        outputRoot, "image_params", imageRecord.params_relative_path,
+        [output_key: imageRecord.output_key])
+      outputArtifacts << paramsArtifact
+      imageRecord.params_content = [
+        name: new File(imageRecord.params_relative_path).name,
+        size_bytes: paramsArtifact.size_bytes,
+        sha256: paramsArtifact.sha256
+      ]
+    }
+  if (manifest.summary_workbook_status == "complete") {
+    def workbookArtifact = outputArtifactRecord(
+      outputRoot, "summary_workbook", manifest.summary_workbook)
+    outputArtifacts << workbookArtifact
+    manifest.summary_workbook_content = [
+      name: manifest.summary_workbook,
+      size_bytes: workbookArtifact.size_bytes,
+      sha256: workbookArtifact.sha256
+    ]
+  }
+  outputArtifacts = outputArtifacts.sort { a, b ->
+    def roleOrder = a.role.toString() <=> b.role.toString()
+    return roleOrder != 0 ? roleOrder :
+      a.relative_path.toString() <=> b.relative_path.toString()
+  }
+  manifest.output_artifact_digest_contract =
+    "sha256_utf8_lf_role_tab_relative_path_tab_size_bytes_tab_sha256_v1"
+  manifest.output_artifacts = outputArtifacts
+  manifest.output_artifact_set_sha256 = outputArtifactSetSha256(outputArtifacts)
+  manifest.publication_status = manifest.status == "complete" ?
+    "sealed_complete" : "sealed_incomplete_qc_only"
+  manifest.input_content_verified_at_manifest_publication = true
+  manifest.stardist_authority_verified_at_manifest_publication =
+    stardistAuthority.active == true
+  manifest.engine_script_verified_at_manifest_publication = true
+
+  atomicWriteBytes(
+    new File(outputRoot, "run_manifest.json"),
+    (JsonOutput.prettyPrint(JsonOutput.toJson(manifest)) + "\n")
+      .getBytes(java.nio.charset.StandardCharsets.UTF_8))
+} catch (Throwable t) {
+  failRun("Cannot seal the run publication manifest: " + t.message, t)
+}
 
 IJ.log("DONE. Wrote run_summary.csv, run_summary.xlsx, and run_manifest.json to " + OUTPUT_DIR +
        " | success=" + manifest.success_count + " skipped=" + manifest.skipped_count +
@@ -4020,6 +4907,11 @@ if (!failures.isEmpty()) {
 if (workbookFailure != null) {
   failRun("Image analysis completed, but run_summary.xlsx could not be written: " +
     workbookFailure.getMessage() + ". See run_manifest.json and the Fiji log.", workbookFailure)
+}
+if (!maxImagesExcludedFiles.isEmpty()) {
+  failRun("Run stopped at IFQ_MAX_IMAGES=" + MAX_IMAGES + " and excluded " +
+    maxImagesExcludedFiles.size() + " analytical candidate(s). Outputs are retained for QC, " +
+    "but the run is incomplete and must not enter aggregation.")
 }
 
 // ImageJ starts non-daemon UI/event threads even with --headless. Exit after

@@ -58,6 +58,9 @@ import loci.formats.meta.IMetadata
 import ome.units.UNITS
 
 import ij.io.RoiEncoder
+import ij.io.FileSaver
+import ij.IJ
+import ij.ImagePlus
 import ij.process.ByteProcessor
 import ij.process.FloatProcessor
 import ij.process.ImageProcessor
@@ -73,6 +76,10 @@ import org.locationtech.jts.geom.util.AffineTransformation
 import qupath.lib.io.GsonTools          // QuPath 0.7 does not bundle groovy-json
 import java.awt.image.BandedSampleModel
 import java.awt.image.DataBufferUShort
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -109,6 +116,35 @@ def envBool = { String name, boolean fallback ->
   return raw == "true"
 }
 
+@groovy.transform.CompileStatic
+class ContentHash {
+  static String sha256File(File file) {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    byte[] buffer = new byte[1024 * 1024]
+    InputStream input = new BufferedInputStream(new FileInputStream(file), buffer.length)
+    try {
+      int count
+      while ((count = input.read(buffer)) >= 0) {
+        if (count > 0) digest.update(buffer, 0, count)
+      }
+    } finally {
+      input.close()
+    }
+    byte[] bytes = digest.digest()
+    StringBuilder encoded = new StringBuilder(bytes.length * 2)
+    for (byte value : bytes) encoded.append(String.format("%02x", value & 0xff))
+    return encoded.toString()
+  }
+
+  static String sha256Utf8(String text) {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    byte[] bytes = digest.digest(text.getBytes(StandardCharsets.UTF_8))
+    StringBuilder encoded = new StringBuilder(bytes.length * 2)
+    for (byte value : bytes) encoded.append(String.format("%02x", value & 0xff))
+    return encoded.toString()
+  }
+}
+
 // Clipping a traced mask by a tile rectangle frequently yields a
 // GeometryCollection (a polygon plus stray lines/points where the tile edge
 // grazes the mask). JTS overlay operations REJECT GeometryCollection inputs
@@ -132,17 +168,51 @@ def polygonal = { Geometry gm ->
 def INPUT          = envOr("IFQ_WSI_INPUT", "")
 def OUTPUT         = envOr("IFQ_WSI_OUTPUT", "")
 def SLIDE_META_CSV = envOr("IFQ_WSI_SLIDE_METADATA", "")
+def STAGE1_SCRIPT_PATH = envOr("IFQ_WSI_STAGE1_SCRIPT_PATH", "")
+def REFERENCE_MASK_PROFILE_PATH = envOr("IFQ_WSI_REFERENCE_MASK_PROFILE", "")
 
 // ---- tiling -----------------------------------------------------------------
 def CORE_PX        = envInt("IFQ_WSI_CORE_PX", 2048)
 def HALO_PX        = envInt("IFQ_WSI_HALO_PX", 128)
-def MIN_TISSUE_UM2 = envDouble("IFQ_WSI_MIN_TILE_TISSUE_UM2", 2000.0d)
+def MIN_TISSUE_UM2 = envDouble("IFQ_WSI_MIN_TILE_TISSUE_UM2", 0.0d)
 
 // ---- series selection (refuse to quantify the macro/label/overview) ---------
 def MAX_PIXEL_UM   = envDouble("IFQ_WSI_MAX_PIXEL_UM", 0.5d)
 def EXPECT_NCH     = envInt("IFQ_WSI_EXPECT_CHANNELS", 4)
-def CH_PATTERNS    = envOr("IFQ_WSI_CHANNEL_PATTERNS",
-                       "^\\s*dapi|fitc|488|krt.?5|alexa.?488|cy3|555|ager|tritc|alexa.?555|cy5|647|pdpn|t1a|podoplanin|alexa.?647")
+// This validates acquisition ORDER only. A wavelength/filter label such as
+// FITC does not prove that the biological marker is KRT5; that identity remains
+// the responsibility of the frozen acquisition protocol and panel mapping.
+// Semicolon is the delimiter because it is not used by the supported patterns.
+def DEFAULT_ORDERED_CHANNEL_PATTERNS = [
+    '^\\s*(?:dapi|hoechst|405).*$',
+    '^\\s*(?:fitc|488|krt.?5|pro.?spc|alexa.?488).*$',
+    '^\\s*(?:cy3|555|ager|m.?rage|tritc|alexa.?555).*$',
+    '^\\s*(?:cy5|647|pdpn|t1a|t1alpha|podoplanin|krt8|alexa.?647).*$'
+]
+def ORDERED_CHANNEL_PATTERNS_RAW = envOr(
+    "IFQ_WSI_ORDERED_CHANNEL_PATTERNS",
+    DEFAULT_ORDERED_CHANNEL_PATTERNS.join(";"))
+def ORDERED_CHANNEL_PATTERN_TEXTS = ORDERED_CHANNEL_PATTERNS_RAW
+    .split(";", -1).collect { it.trim() }
+if (EXPECT_NCH < 1) {
+  failRun("IFQ_WSI_EXPECT_CHANNELS must be a positive integer; found " + EXPECT_NCH)
+}
+if (ORDERED_CHANNEL_PATTERN_TEXTS.size() != EXPECT_NCH ||
+    ORDERED_CHANNEL_PATTERN_TEXTS.any { it.isEmpty() }) {
+  failRun("IFQ_WSI_ORDERED_CHANNEL_PATTERNS must contain exactly " + EXPECT_NCH +
+          " non-empty semicolon-delimited regex patterns in acquisition order; found " +
+          ORDERED_CHANNEL_PATTERN_TEXTS.size())
+}
+def ORDERED_CHANNEL_PATTERNS = []
+ORDERED_CHANNEL_PATTERN_TEXTS.eachWithIndex { patternText, index ->
+  try {
+    ORDERED_CHANNEL_PATTERNS << java.util.regex.Pattern.compile(
+        patternText, java.util.regex.Pattern.CASE_INSENSITIVE)
+  } catch (java.util.regex.PatternSyntaxException e) {
+    failRun("Invalid ordered channel regex at 1-based position " + (index + 1) +
+            " in IFQ_WSI_ORDERED_CHANNEL_PATTERNS: " + e.getMessage())
+  }
+}
 
 // ---- tissue detection (the DENOMINATOR of the primary endpoint) ------------
 def TISSUE_DS      = envDouble("IFQ_WSI_TISSUE_DOWNSAMPLE", 16.0d)
@@ -160,11 +230,16 @@ def FILL_HOLES     = envBool("IFQ_WSI_FILL_INTERIOR_RINGS", false)
 def COMPRESSION    = envOr("IFQ_WSI_COMPRESSION", "ZLIB")
 def WRITE_TILE_PX  = envInt("IFQ_WSI_WRITE_TILE_PX", 256)
 def PARALLEL       = envInt("IFQ_WSI_PARALLEL", 4)
-def RESUME         = envBool("IFQ_WSI_RESUME", true)
+def RESUME         = envBool("IFQ_WSI_RESUME", false)
 def DRY_RUN        = envBool("IFQ_WSI_DRY_RUN", false)
 // Smoke-test aid: stop after N tiles per slide. 0 = no cap. A capped run is
 // NOT a valid analysis -- the manifest records the cap so Stage 3 refuses it.
 def MAX_TILES      = envInt("IFQ_WSI_MAX_TILES_PER_SLIDE", 0)
+if (RESUME) {
+  failRun("IFQ_WSI_RESUME=true is unavailable: Stage 1 has no content-addressed " +
+          "checkpoint binding the source slide, script, tissue mask, configuration, " +
+          "tile, and ROI bytes. Use a new Stage 1 output root.")
+}
 
 // ---- damaged-area partition (the endpoint DENOMINATOR) ----------------------
 // Endpoint: KRT5+ area / DAMAGED ALVEOLAR area (Lin et al. 2024, JCI
@@ -214,8 +289,24 @@ if (!ROI_COMPARTMENT.isEmpty()) {
 
 if (INPUT.isEmpty())  failRun("IFQ_WSI_INPUT is required (a .vsi file or a folder containing .vsi files)")
 if (OUTPUT.isEmpty()) failRun("IFQ_WSI_OUTPUT is required")
+if (STAGE1_SCRIPT_PATH.isEmpty())
+  failRun("IFQ_WSI_STAGE1_SCRIPT_PATH is required so the executed Stage 1 script bytes " +
+          "can be content-bound in stage1_manifest.json")
+def stage1ScriptFile = new File(STAGE1_SCRIPT_PATH)
+if (!stage1ScriptFile.isFile())
+  failRun("IFQ_WSI_STAGE1_SCRIPT_PATH is not a file: " + STAGE1_SCRIPT_PATH)
+if (Files.isSymbolicLink(stage1ScriptFile.toPath()))
+  failRun("IFQ_WSI_STAGE1_SCRIPT_PATH must not be a symbolic link: " + STAGE1_SCRIPT_PATH)
+stage1ScriptFile = stage1ScriptFile.getCanonicalFile()
+def stage1ScriptRecord = [
+  name: stage1ScriptFile.name,
+  size_bytes: stage1ScriptFile.length(),
+  sha256: ContentHash.sha256File(stage1ScriptFile)
+]
 if (HALO_PX < 0)      failRun("IFQ_WSI_HALO_PX must be >= 0")
 if (CORE_PX <= 0)     failRun("IFQ_WSI_CORE_PX must be > 0")
+if (MIN_TISSUE_UM2 < 0 || !Double.isFinite(MIN_TISSUE_UM2))
+  failRun("IFQ_WSI_MIN_TILE_TISSUE_UM2 must be finite and >= 0; found " + MIN_TISSUE_UM2)
 if (ROI_NAME.toLowerCase().contains("alveol")) {
   logMsg("NOTE: ROI names assert compartment 'alveolar'. This is only true if " +
          "conducting airways have been excluded; airway basal cells are KRT5+ " +
@@ -235,7 +326,8 @@ if (PARTITION) {
             "Derive it from blinded controls first (see docs/ECTOPIC_POD_ENDPOINT.md).")
   try { AGER_THRESHOLD = Double.parseDouble(AGER_THR_RAW.trim()) }
   catch (Exception e) { failRun("IFQ_WSI_AGER_THRESHOLD must be a number; found '" + AGER_THR_RAW + "'") }
-  if (!(AGER_THRESHOLD > 0)) failRun("IFQ_WSI_AGER_THRESHOLD must be > 0")
+  if (!Double.isFinite(AGER_THRESHOLD) || !(AGER_THRESHOLD > 0))
+    failRun("IFQ_WSI_AGER_THRESHOLD must be finite and > 0")
   if (!(DAMAGE_CUTOFF > 0 && DAMAGE_CUTOFF < 1)) failRun("IFQ_WSI_DAMAGE_CUTOFF must be in (0,1)")
   if (!(DAMAGE_SIGMA > 0)) failRun("IFQ_WSI_DAMAGE_SIGMA_UM must be > 0")
 }
@@ -323,6 +415,162 @@ def withRetry = { String what, int attempts, Closure body ->
   throw new IllegalStateException("Gave up on " + what + " after " + attempts + " attempts", last)
 }
 
+def contentRecord = { File input, String label ->
+  if (!input.isFile()) failRun(label + " is not a regular file: " + input.absolutePath)
+  if (Files.isSymbolicLink(input.toPath()))
+    failRun(label + " must not be a symbolic link: " + input.absolutePath)
+  File canonical = input.getCanonicalFile()
+  long sizeBefore = canonical.length()
+  if (sizeBefore <= 0) failRun(label + " must not be empty: " + canonical.absolutePath)
+  String digest = ContentHash.sha256File(canonical)
+  if (canonical.length() != sizeBefore)
+    failRun(label + " changed size while it was being hashed: " + canonical.absolutePath)
+  return [name: canonical.name, size_bytes: sizeBefore, sha256: digest]
+}
+
+def publishFileAtomically = { File source, File destination, String label ->
+  if (destination.exists()) failRun(label + " destination already exists: " + destination.absolutePath)
+  File parent = destination.parentFile
+  if (!parent.isDirectory() && !parent.mkdirs())
+    failRun("Could not create " + label + " directory: " + parent.absolutePath)
+  def temp = Files.createTempFile(parent.toPath(), ".ifq-copy-", ".tmp")
+  try {
+    Files.copy(source.toPath(), temp, StandardCopyOption.REPLACE_EXISTING)
+    try {
+      Files.move(temp, destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+    } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+      Files.move(temp, destination.toPath())
+    }
+  } finally {
+    Files.deleteIfExists(temp)
+  }
+  def sourceRecord = contentRecord(source, label + " source")
+  def publishedRecord = contentRecord(destination, label + " published copy")
+  if (sourceRecord.size_bytes != publishedRecord.size_bytes ||
+      sourceRecord.sha256 != publishedRecord.sha256)
+    failRun(label + " published bytes do not match the declared source artifact")
+  return publishedRecord
+}
+
+def loadStrictBinaryMask = { File file, int expectedWidth, int expectedHeight, String label ->
+  ImagePlus image = IJ.openImage(file.absolutePath)
+  if (image == null) failRun("Could not open " + label + ": " + file.absolutePath)
+  try {
+    if (image.getStackSize() != 1 || image.getNChannels() != 1 || image.getNFrames() != 1)
+      failRun(label + " must be a single-plane, single-channel image")
+    if (image.getBitDepth() != 8)
+      failRun(label + " must be 8-bit binary (0/255); found bit depth " + image.getBitDepth())
+    if (image.getWidth() != expectedWidth || image.getHeight() != expectedHeight)
+      failRun(label + " dimensions " + image.getWidth() + "x" + image.getHeight() +
+              " do not match the selected-series downsample grid " +
+              expectedWidth + "x" + expectedHeight)
+    byte[] sourcePixels = (byte[]) image.getProcessor().getPixels()
+    byte[] pixels = sourcePixels.clone()
+    for (int i = 0; i < pixels.length; i++) {
+      int value = pixels[i] & 0xFF
+      if (value != 0 && value != 255)
+        failRun(label + " must contain only 0 and 255; found " + value +
+                " at linear pixel index " + i)
+    }
+    return new ByteProcessor(expectedWidth, expectedHeight, pixels, null)
+  } finally {
+    image.close()
+  }
+}
+
+def publishBinaryMaskTiff = { ByteProcessor mask, File destination, String label ->
+  if (destination.exists()) failRun(label + " destination already exists: " + destination.absolutePath)
+  File parent = destination.parentFile
+  if (!parent.isDirectory() && !parent.mkdirs())
+    failRun("Could not create " + label + " directory: " + parent.absolutePath)
+  def temp = Files.createTempFile(parent.toPath(), ".ifq-mask-", ".tif")
+  try {
+    ImagePlus image = new ImagePlus(label, mask.duplicate())
+    try {
+      if (!new FileSaver(image).saveAsTiff(temp.toFile().absolutePath))
+        failRun("Could not serialize " + label + " as TIFF")
+    } finally {
+      image.close()
+    }
+    try {
+      Files.move(temp, destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+    } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+      Files.move(temp, destination.toPath())
+    }
+  } finally {
+    Files.deleteIfExists(temp)
+  }
+  return contentRecord(destination, label)
+}
+
+// Bio-Formats is the only authority for the Olympus package members actually
+// used to open a VSI.  A filename/stem glob can both miss nested ETS payloads
+// and absorb unrelated files.  Hash the exact getUsedFiles() set before and
+// after tile export; Stage 1 publishes no manifest if membership or bytes move.
+def buildSourcePackage = { File slideFile ->
+  File source = slideFile.getCanonicalFile()
+  File packageRoot = source.parentFile.getCanonicalFile()
+  def reader = new ImageReader()
+  reader.setFlattenedResolutions(false)
+  List<String> usedPaths
+  try {
+    reader.setId(source.absolutePath)
+    usedPaths = (reader.getUsedFiles() ?: new String[0]).toList()
+  } finally {
+    try { reader.close() } catch (Exception ignore) {}
+  }
+  if (usedPaths.isEmpty())
+    failRun("Bio-Formats reported no used files for " + source.absolutePath)
+
+  def members = []
+  def seen = new HashSet<String>()
+  boolean containsSource = false
+  usedPaths.each { String reportedPath ->
+    File reported = new File(reportedPath)
+    if (Files.isSymbolicLink(reported.toPath()))
+      failRun("Bio-Formats source-package member must not be a symbolic link: " + reportedPath)
+    File member = reported.getCanonicalFile()
+    if (!member.isFile())
+      failRun("Bio-Formats reported a missing source-package member: " + member.absolutePath)
+    String rootPrefix = packageRoot.absolutePath + File.separator
+    if (!(member.absolutePath == packageRoot.absolutePath ||
+          member.absolutePath.startsWith(rootPrefix)))
+      failRun("Bio-Formats source-package member escapes the VSI parent directory: " +
+              member.absolutePath)
+    String relative = packageRoot.toPath().relativize(member.toPath()).toString()
+        .replace(File.separatorChar, '/' as char)
+    if (relative.isEmpty() || relative == "." || relative.startsWith("../") ||
+        relative.contains("/../") || relative.contains("\\") ||
+        relative.contains("\t") || relative.contains("\r") || relative.contains("\n"))
+      failRun("Unsafe Bio-Formats source-package relative path: " + relative)
+    if (!seen.add(relative))
+      failRun("Bio-Formats reported a duplicate source-package member: " + relative)
+    if (member.absolutePath == source.absolutePath) containsSource = true
+    members << [
+      relative_path: relative,
+      size_bytes: member.length(),
+      sha256: ContentHash.sha256File(member)
+    ]
+  }
+  if (!containsSource)
+    failRun("Bio-Formats used-file list does not include the source VSI: " + source.absolutePath)
+  members.sort { a, b -> a.relative_path <=> b.relative_path }
+  StringBuilder packageLines = new StringBuilder()
+  members.each { member ->
+    packageLines.append(member.relative_path).append('\t')
+        .append(member.size_bytes).append('\t')
+        .append(member.sha256).append('\n')
+  }
+  return [
+    format: "olympus_vsi",
+    source_vsi: source.name,
+    discovery_authority: "bioformats_ImageReader_getUsedFiles",
+    package_hash_algorithm: "sha256_utf8_path_tab_size_tab_sha256_lf",
+    members: members,
+    package_sha256: ContentHash.sha256Utf8(packageLines.toString())
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Series enumeration. checkImageSupport() silently DROPS thumbnail series and
 // is not a series count. loci getSeriesCount() sees all of them.
@@ -362,7 +610,7 @@ def enumerateSeries = { String filePath ->
  * and the "overview" series is a genuine calibrated DAPI fluorescence image at
  * 1.7 um/px, so a naive "reject > 2 um/px" rule would let it through.
  */
-def selectSeries = { List seriesList, double maxPxUm, int nChReq, java.util.regex.Pattern chPat ->
+def selectSeries = { List seriesList, double maxPxUm, int nChReq, List orderedPatterns ->
   def rejected = []
   def cands = seriesList.findAll { s ->
     if (s.isThumbnail)                     { rejected << "${s.series}: thumbnail series";              return false }
@@ -373,8 +621,17 @@ def selectSeries = { List seriesList, double maxPxUm, int nChReq, java.util.rege
     if (Double.isNaN(s.pixelWidthMicrons) || !(s.pixelWidthMicrons > 0.0d)) {
       rejected << "${s.series}: uncalibrated (pixelWidthMicrons=${s.pixelWidthMicrons})"; return false }
     if (s.pixelWidthMicrons > maxPxUm)     { rejected << "${s.series}: ${s.pixelWidthMicrons} um/px > ${maxPxUm}"; return false }
-    def bad = s.channelNames.findAll { nm -> nm == null || !(nm.toLowerCase() =~ chPat) }
-    if (!bad.isEmpty())                    { rejected << "${s.series}: channel names not recognised ${s.channelNames}"; return false }
+    def mismatches = []
+    for (int channelIndex = 0; channelIndex < nChReq; channelIndex++) {
+      def name = s.channelNames[channelIndex]
+      if (name == null || !orderedPatterns[channelIndex].matcher(name.toString()).matches()) {
+        mismatches << "C${channelIndex + 1}='${name}'"
+      }
+    }
+    if (!mismatches.isEmpty()) {
+      rejected << "${s.series}: ordered acquisition-channel mismatch " + mismatches.join(", ")
+      return false
+    }
     return true
   }
   return [candidates: cands, rejected: rejected]
@@ -419,6 +676,130 @@ def readSlideMetadataCsv = { String p ->
   return out
 }
 
+def loadReferenceMaskProfile = { String profilePath, List<File> inputSlides ->
+  if (profilePath.isEmpty()) return null
+  File profileFile = new File(profilePath)
+  def profileContent = contentRecord(profileFile, "IFQ_WSI_REFERENCE_MASK_PROFILE")
+  profileFile = profileFile.getCanonicalFile()
+  Map root
+  try {
+    root = (Map) GsonTools.getInstance().fromJson(profileFile.getText("UTF-8"), Map.class)
+  } catch (Exception e) {
+    failRun("Cannot parse IFQ_WSI_REFERENCE_MASK_PROFILE as JSON: " + profileFile.absolutePath, e)
+    return null
+  }
+  if (root == null) failRun("IFQ_WSI_REFERENCE_MASK_PROFILE must contain a JSON object")
+  def rootKeys = ['$schema', "schema_version", "profile_id", "review_state",
+                  "review_protocol_id", "coordinate_space", "mask_logic", "slides"] as Set
+  if ((root.keySet() as Set) != rootKeys)
+    failRun("Reference-mask profile fields must be exactly " + rootKeys + "; found " + root.keySet())
+  if (root['$schema'] != "https://ifquant-lung.invalid/schemas/wsi-reference-mask-profile.schema.json")
+    failRun('Reference-mask profile has an unsupported $schema')
+  if (root.schema_version != "1.0.0") failRun("Reference-mask profile schema_version must be 1.0.0")
+  if (!(root.profile_id instanceof String) || root.profile_id.trim().isEmpty() ||
+      root.profile_id != root.profile_id.trim() ||
+      root.profile_id.contains("\t") || root.profile_id.contains("\r") ||
+      root.profile_id.contains("\n"))
+    failRun("Reference-mask profile_id must be a non-empty string without surrounding/control whitespace")
+  if (!(root.review_state in ["engineering_unreviewed", "expert_reviewed"]))
+    failRun("Reference-mask review_state must be engineering_unreviewed or expert_reviewed")
+  if (!(root.review_protocol_id instanceof String) || root.review_protocol_id.trim().isEmpty() ||
+      root.review_protocol_id != root.review_protocol_id.trim() ||
+      root.review_protocol_id.contains("\t") || root.review_protocol_id.contains("\r") ||
+      root.review_protocol_id.contains("\n"))
+    failRun("Reference-mask review_protocol_id must be a non-empty string without surrounding/control whitespace")
+  if (root.coordinate_space != "selected_series_downsample_grid")
+    failRun("Reference-mask coordinate_space must be selected_series_downsample_grid")
+  if (root.mask_logic != "tissue_foreground_minus_airway_foreground")
+    failRun("Reference-mask mask_logic must be tissue_foreground_minus_airway_foreground")
+  if (!(root.slides instanceof List) || root.slides.isEmpty())
+    failRun("Reference-mask profile must contain at least one slide")
+
+  File profileRoot = profileFile.parentFile.getCanonicalFile()
+  String profileRootPrefix = profileRoot.absolutePath + File.separator
+  def safeMaskArtifact = { Object raw, String label ->
+    if (!(raw instanceof Map)) failRun(label + " must be an object")
+    def expected = ["relative_path", "size_bytes", "sha256"] as Set
+    if ((raw.keySet() as Set) != expected)
+      failRun(label + " fields must be exactly " + expected + "; found " + raw.keySet())
+    String token = raw.relative_path == null ? "" : raw.relative_path.toString()
+    def parts = token.split("/", -1) as List
+    if (token.isEmpty() || token != token.trim() || token.startsWith("/") || token.contains("\\") ||
+        token ==~ /^[A-Za-z]:.*/ || parts.any { it.isEmpty() || it == "." || it == ".." } ||
+        token.contains("\t") || token.contains("\r") || token.contains("\n"))
+      failRun(label + ".relative_path is not a safe portable relative path: " + token)
+    if (!(raw.size_bytes instanceof Number) ||
+        raw.size_bytes.doubleValue() != Math.rint(raw.size_bytes.doubleValue()) ||
+        raw.size_bytes.longValue() <= 0)
+      failRun(label + ".size_bytes must be a positive integer")
+    String declaredSha = raw.sha256 == null ? "" : raw.sha256.toString()
+    if (!(declaredSha ==~ /^[0-9a-f]{64}$/)) failRun(label + ".sha256 must be lowercase SHA-256")
+    File artifact = new File(profileRoot, token)
+    if (Files.isSymbolicLink(artifact.toPath())) failRun(label + " must not be a symbolic link: " + token)
+    artifact = artifact.getCanonicalFile()
+    if (!artifact.absolutePath.startsWith(profileRootPrefix))
+      failRun(label + " escapes the reference-mask profile directory: " + token)
+    def actual = contentRecord(artifact, label)
+    if (actual.size_bytes != raw.size_bytes.longValue() || actual.sha256 != declaredSha)
+      failRun(label + " content does not match its declared size/SHA-256: " + token)
+    return [relative_path: token, size_bytes: actual.size_bytes, sha256: actual.sha256,
+            _file: artifact]
+  }
+
+  def integerField = { Map row, String key, String label, int minimum ->
+    def value = row[key]
+    if (!(value instanceof Number) || value.doubleValue() != Math.rint(value.doubleValue()) ||
+        value.longValue() < minimum)
+      failRun(label + "." + key + " must be an integer >= " + minimum)
+    return value.intValue()
+  }
+  def normalizedSlides = [:]
+  def slideKeys = ["source_vsi", "source_package_sha256", "series_index",
+                   "full_resolution_width", "full_resolution_height", "downsample",
+                   "mask_width", "mask_height", "tissue_mask", "airway_mask"] as Set
+  root.slides.eachWithIndex { raw, index ->
+    String label = "Reference-mask slides[" + index + "]"
+    if (!(raw instanceof Map)) failRun(label + " must be an object")
+    if ((raw.keySet() as Set) != slideKeys)
+      failRun(label + " fields must be exactly " + slideKeys + "; found " + raw.keySet())
+    String sourceVsi = raw.source_vsi == null ? "" : raw.source_vsi.toString()
+    if (sourceVsi.isEmpty() || sourceVsi != sourceVsi.trim() || sourceVsi.contains(":") ||
+        sourceVsi.contains("/") || sourceVsi.contains("\\") ||
+        sourceVsi.contains("\t") || sourceVsi.contains("\r") || sourceVsi.contains("\n") ||
+        !sourceVsi.toLowerCase().endsWith(".vsi"))
+      failRun(label + ".source_vsi must be a plain .vsi filename")
+    if (normalizedSlides.containsKey(sourceVsi))
+      failRun("Reference-mask profile contains duplicate source_vsi: " + sourceVsi)
+    String packageSha = raw.source_package_sha256 == null ? "" : raw.source_package_sha256.toString()
+    if (!(packageSha ==~ /^[0-9a-f]{64}$/))
+      failRun(label + ".source_package_sha256 must be lowercase SHA-256")
+    if (!(raw.downsample instanceof Number) || !Double.isFinite(raw.downsample.doubleValue()) ||
+        raw.downsample.doubleValue() <= 0)
+      failRun(label + ".downsample must be finite and > 0")
+    normalizedSlides[sourceVsi] = [
+      source_vsi: sourceVsi,
+      source_package_sha256: packageSha,
+      series_index: integerField(raw, "series_index", label, 0),
+      full_resolution_width: integerField(raw, "full_resolution_width", label, 1),
+      full_resolution_height: integerField(raw, "full_resolution_height", label, 1),
+      downsample: raw.downsample.doubleValue(),
+      mask_width: integerField(raw, "mask_width", label, 1),
+      mask_height: integerField(raw, "mask_height", label, 1),
+      tissue_mask: safeMaskArtifact(raw.tissue_mask, label + ".tissue_mask"),
+      airway_mask: safeMaskArtifact(raw.airway_mask, label + ".airway_mask")
+    ]
+  }
+  def inputNames = inputSlides.collect { it.name }
+  if ((normalizedSlides.keySet() as Set) != (inputNames as Set))
+    failRun("Reference-mask profile slide set must exactly equal IFQ_WSI_INPUT. profile=" +
+            normalizedSlides.keySet().sort() + " input=" + inputNames.sort())
+  return [file: profileFile, content: profileContent,
+          profile_id: root.profile_id.trim(), review_state: root.review_state,
+          review_protocol_id: root.review_protocol_id.trim(),
+          coordinate_space: root.coordinate_space, mask_logic: root.mask_logic,
+          slides: normalizedSlides]
+}
+
 // ---------------------------------------------------------------------------
 // Resolve the input slide list
 // ---------------------------------------------------------------------------
@@ -438,26 +819,92 @@ if (inFile.isDirectory()) {
 if (slides.isEmpty()) failRun("No .vsi files found under " + INPUT)
 
 def slideMetaCsv = readSlideMetadataCsv(SLIDE_META_CSV)
-def outRoot = new File(OUTPUT); outRoot.mkdirs()
-def chPattern = java.util.regex.Pattern.compile(CH_PATTERNS, java.util.regex.Pattern.CASE_INSENSITIVE)
+def referenceMaskProfile = loadReferenceMaskProfile(REFERENCE_MASK_PROFILE_PATH, slides)
+
+// Stage 1 has no content-addressed resume/checkpoint contract. Refuse every
+// pre-existing entry -- including hidden or unrelated files -- before writing
+// any analytical artifact, so stale tiles can never survive into this run.
+def outRoot = new File(OUTPUT)
+if (outRoot.exists()) {
+  if (!outRoot.isDirectory())
+    failRun("IFQ_WSI_OUTPUT exists but is not a directory: " + outRoot.getAbsolutePath())
+  def existingOutputEntries = outRoot.listFiles()
+  if (existingOutputEntries == null)
+    failRun("Cannot inspect IFQ_WSI_OUTPUT before launch: " + outRoot.getAbsolutePath())
+  if (existingOutputEntries.length > 0)
+    failRun("IFQ_WSI_OUTPUT must be empty because Stage 1 resume is unavailable; found " +
+            existingOutputEntries.length + " pre-existing entr" +
+            (existingOutputEntries.length == 1 ? "y" : "ies") + ". Use a new output root.")
+} else if (!outRoot.mkdirs()) {
+  failRun("Could not create IFQ_WSI_OUTPUT: " + outRoot.getAbsolutePath())
+}
+
+def publishedReferenceProfile = null
+if (referenceMaskProfile != null) {
+  File publishedProfileFile = new File(outRoot, "reference_mask_profile.json")
+  def publishedContent = publishFileAtomically(
+      referenceMaskProfile.file, publishedProfileFile, "reference-mask profile")
+  if (publishedContent.size_bytes != referenceMaskProfile.content.size_bytes ||
+      publishedContent.sha256 != referenceMaskProfile.content.sha256)
+    failRun("Reference-mask profile changed between validation and publication")
+  publishedReferenceProfile = [
+    profile_id: referenceMaskProfile.profile_id,
+    review_state: referenceMaskProfile.review_state,
+    review_protocol_id: referenceMaskProfile.review_protocol_id,
+    coordinate_space: referenceMaskProfile.coordinate_space,
+    mask_logic: referenceMaskProfile.mask_logic,
+    published_relative_path: publishedProfileFile.name,
+    content: publishedContent,
+    content_verified_before_and_after: true
+  ]
+}
 
 logMsg("slides            : " + slides.size())
 logMsg("core/halo px      : " + CORE_PX + " / " + HALO_PX + "  (export " + (CORE_PX + 2*HALO_PX) + " px)")
 logMsg("tissue downsample : " + TISSUE_DS + "   fillInteriorRings=" + FILL_HOLES)
+logMsg("reference space   : " + (referenceMaskProfile == null ?
+       "automatic DAPI/Otsu engineering mask (airways not excluded)" :
+       ("external tissue-minus-airway profile " + referenceMaskProfile.profile_id +
+        " [" + referenceMaskProfile.review_state + "]")))
 logMsg("compression       : " + COMPRESSION + " (lossless)   panel=" + PANEL + "   roiName=" + ROI_NAME)
 logMsg("output            : " + outRoot.getAbsolutePath())
 
-def runRecord = [ schema_version: "1.0", stage: "wsi_tile_export",
+def runRecord = [ schema_version: "1.2", stage: "wsi_tile_export",
                   generated_utc : java.time.Instant.now().toString(),
-                  qupath_series_selection: [ max_pixel_um: MAX_PIXEL_UM, expect_channels: EXPECT_NCH ],
+                  stage1_script: stage1ScriptRecord,
+                  qupath_series_selection: [
+                    max_pixel_um: MAX_PIXEL_UM,
+                    expect_channels: EXPECT_NCH,
+                    ordered_channel_patterns: ORDERED_CHANNEL_PATTERN_TEXTS,
+                    channel_order_authority: "acquisition_order_pattern_only_not_biological_identity"
+                  ],
                   tiling: [ core_px: CORE_PX, halo_px: HALO_PX, min_tile_tissue_um2: MIN_TISSUE_UM2 ],
-                  tissue: [ downsample: TISSUE_DS, blur_sigma_px: TISSUE_BLUR,
-                            close_radius_px: TISSUE_CLOSE_R, open_radius_px: TISSUE_OPEN_R,
-                            min_fragment_mm2: MIN_FRAG_MM2, fill_interior_rings: FILL_HOLES,
-                            threshold_method: "Otsu", channel: "nuclear/DAPI (index 0)" ],
+                  tissue: [
+                    mode: (referenceMaskProfile == null ?
+                           "automatic_dapi_otsu_engineering" : "external_binary_reference_masks"),
+                    downsample: TISSUE_DS, blur_sigma_px: TISSUE_BLUR,
+                    close_radius_px: TISSUE_CLOSE_R, open_radius_px: TISSUE_OPEN_R,
+                    min_fragment_mm2: MIN_FRAG_MM2, fill_interior_rings: FILL_HOLES,
+                    threshold_method: (referenceMaskProfile == null ? "Otsu" : "external_binary_mask"),
+                    channel: (referenceMaskProfile == null ? "nuclear/DAPI (index 0)" : null),
+                    airway_exclusion: (referenceMaskProfile == null ?
+                                       "not_available" : "explicit_binary_mask_subtracted"),
+                    reference_mask_profile: publishedReferenceProfile
+                  ],
                   export: [ compression: COMPRESSION, write_tile_px: WRITE_TILE_PX,
                             format: "OME-TIFF, single series, single resolution" ],
-                  downstream: [ panel: PANEL, roi_name: ROI_NAME ],
+                  downstream: [
+                    panel: PANEL,
+                    partition_damage: PARTITION,
+                    ager_channel: AGER_CH,
+                    ager_threshold: (PARTITION ? AGER_THRESHOLD : null),
+                    damage_sigma_um: DAMAGE_SIGMA,
+                    damage_cutoff: DAMAGE_CUTOFF,
+                    roi_compartment: ROI_COMPARTMENT,
+                    roi_name: ROI_NAME,
+                    roi_name_damaged: ROI_DAMAGED,
+                    roi_name_intact: ROI_INTACT
+                  ],
                   slides: [] ]
 
 def mouseIndex = [:]   // mouse_id -> [genotype, condition]  (collision guard)
@@ -471,6 +918,13 @@ slides.each { slideFile ->
   logMsg("")
   logMsg("=================================================================")
   logMsg("SLIDE: " + slideFile.name)
+
+  logMsg("  discovering and hashing Bio-Formats source package ...")
+  def sourcePackageBefore = withRetry("source package provenance", 3) {
+    buildSourcePackage(slideFile)
+  }
+  logMsg("  source package: " + sourcePackageBefore.members.size() +
+         " file(s), sha256=" + sourcePackageBefore.package_sha256)
 
   // ---- metadata --------------------------------------------------------
   def md = slideMetaCsv[slideFile.name] ?: slideMetaCsv[stem] ?: parseSlideName(stem)
@@ -497,7 +951,7 @@ slides.each { slideFile ->
         s.series, (s.name ?: "?"), s.width, s.height, s.nChannels, s.nZSlices,
         s.pixelWidthMicrons, s.pixelType, s.isThumbnail ? " (thumbnail)" : ""))
   }
-  def sel = selectSeries(seriesList, MAX_PIXEL_UM, EXPECT_NCH, chPattern)
+  def sel = selectSeries(seriesList, MAX_PIXEL_UM, EXPECT_NCH, ORDERED_CHANNEL_PATTERNS)
   if (sel.candidates.size() != 1) {
     failRun("Expected exactly ONE series with <= " + MAX_PIXEL_UM + " um/px, " + EXPECT_NCH +
             " channels, Z=1 and recognisable channel names in '" + slideFile.name + "'.\n" +
@@ -530,42 +984,156 @@ slides.each { slideFile ->
   double pxAreaUm2 = pxUm * pxUmH
   int W = server.getWidth(), H = server.getHeight()
 
+  def slideOut = new File(outRoot, stem)
+  if (!slideOut.mkdir()) failRun("Could not create slide output directory: " + slideOut.absolutePath)
+  def referenceDir = new File(slideOut, "reference_space")
+  if (!referenceDir.mkdir()) failRun("Could not create reference-space directory: " + referenceDir.absolutePath)
+  def referenceArtifactsToVerify = []
+
   // ---- global tissue detection ----------------------------------------
-  logMsg("  detecting tissue on channel 0 at downsample " + TISSUE_DS + " ...")
+  logMsg((referenceMaskProfile == null ? "  detecting tissue on channel 0" :
+          "  loading external tissue/airway masks") + " at downsample " + TISSUE_DS + " ...")
   long t0 = System.currentTimeMillis()
   def img = withRetry("readRegion(tissue)", 3) { server.readRegion(TISSUE_DS, 0, 0, W, H) }
   def raster = img.getRaster()
   int mw = img.getWidth(), mh = img.getHeight()
   def sm = raster.getSampleModel(), db = raster.getDataBuffer()
-  short[] pix
   boolean fast = (db instanceof DataBufferUShort) && (sm instanceof BandedSampleModel) &&
                  raster.getSampleModelTranslateX() == 0 && raster.getSampleModelTranslateY() == 0 &&
                  sm.getBankIndices()[0] == 0 && sm.getBandOffsets()[0] == 0 &&
                  sm.getScanlineStride() == mw && db.getOffsets()[0] == 0
-  if (fast) {
-    pix = ((DataBufferUShort) db).getData(0)
+  Double thr = null
+  ByteProcessor bp
+  long rawTissuePx = 0L, airwayPx = 0L
+  def referenceSpaceRecord
+  if (referenceMaskProfile == null) {
+    short[] pix
+    if (fast) {
+      pix = ((DataBufferUShort) db).getData(0)
+    } else {
+      int[] tmp = new int[mw * mh]
+      raster.getSamples(0, 0, mw, mh, 0, tmp)
+      pix = new short[mw * mh]
+      for (int i = 0; i < tmp.length; i++) pix[i] = (short) tmp[i]
+    }
+    def fp = Px.toFloat(pix, mw, mh)
+    new GaussianBlur().blurGaussian(fp, TISSUE_BLUR)
+    float[] f = (float[]) fp.getPixels()
+    thr = Px.otsuThreshold(f)
+    bp = Px.threshold(f, mw, mh, thr)
+    // RankFilters MAX/MIN, NOT ByteProcessor.dilate()/erode(): with
+    // ij.Prefs.blackBackground=false (the headless default) those are polarity
+    // inverted and silently destroy the mask.
+    def rf = new RankFilters()
+    rf.rank(bp, TISSUE_CLOSE_R, RankFilters.MAX); rf.rank(bp, TISSUE_CLOSE_R, RankFilters.MIN)
+    rf.rank(bp, TISSUE_OPEN_R,  RankFilters.MIN); rf.rank(bp, TISSUE_OPEN_R,  RankFilters.MAX)
+    rawTissuePx = Px.countForeground(bp)
+    def rasterFile = new File(referenceDir, "automatic_dapi_tissue_raster.tif")
+    def rasterContent = publishBinaryMaskTiff(bp, rasterFile, "automatic DAPI tissue raster")
+    referenceArtifactsToVerify << [file: rasterFile, content: rasterContent,
+                                  label: "automatic DAPI tissue raster"]
+    referenceSpaceRecord = [
+      mode: "automatic_dapi_otsu_engineering",
+      authority: "generated_dapi_otsu_raster_and_content_bound_tile_rois",
+      profile_id: "automatic_dapi_otsu_engineering",
+      review_state: "engineering_unreviewed",
+      review_protocol_id: "automatic_dapi_otsu",
+      coordinate_space: "selected_series_downsample_grid",
+      mask_logic: "dapi_otsu_tissue_without_airway_exclusion",
+      sampling_semantics: "exhaustive_grid_over_declared_reference_space",
+      airway_excluded: false,
+      downsample: TISSUE_DS, mask_width: mw, mask_height: mh,
+      tissue_mask: [published_relative_path: "reference_space/" + rasterFile.name,
+                    content: rasterContent],
+      source_tissue_mask: null, source_airway_mask: null
+    ]
   } else {
-    int[] tmp = new int[mw * mh]
-    raster.getSamples(0, 0, mw, mh, 0, tmp)
-    pix = new short[mw * mh]
-    for (int i = 0; i < tmp.length; i++) pix[i] = (short) tmp[i]
-  }
+    def declared = referenceMaskProfile.slides[slideFile.name]
+    if (declared == null) failRun("Reference-mask profile lacks slide " + slideFile.name)
+    if (declared.source_package_sha256 != sourcePackageBefore.package_sha256)
+      failRun("Reference-mask profile source_package_sha256 does not match the current raw package for " +
+              slideFile.name)
+    if (declared.series_index != chosen.series ||
+        declared.full_resolution_width != W || declared.full_resolution_height != H)
+      failRun("Reference-mask profile series identity/dimensions do not match the selected series for " +
+              slideFile.name)
+    if (Math.abs(declared.downsample - TISSUE_DS) > 1e-12 ||
+        declared.mask_width != mw || declared.mask_height != mh)
+      failRun("Reference-mask profile downsample-grid declaration does not match the opened series for " +
+              slideFile.name + ": declared " + declared.mask_width + "x" + declared.mask_height +
+              " @ " + declared.downsample + ", actual " + mw + "x" + mh + " @ " + TISSUE_DS)
 
-  def fp = Px.toFloat(pix, mw, mh)
-  new GaussianBlur().blurGaussian(fp, TISSUE_BLUR)
-  float[] f = (float[]) fp.getPixels()
-  double thr = Px.otsuThreshold(f)
-  def bp = Px.threshold(f, mw, mh, thr)
-  // RankFilters MAX/MIN, NOT ByteProcessor.dilate()/erode(): with
-  // ij.Prefs.blackBackground=false (the headless default) those are polarity
-  // inverted and silently destroy the mask.
-  def rf = new RankFilters()
-  rf.rank(bp, TISSUE_CLOSE_R, RankFilters.MAX); rf.rank(bp, TISSUE_CLOSE_R, RankFilters.MIN)  // closing
-  rf.rank(bp, TISSUE_OPEN_R,  RankFilters.MIN); rf.rank(bp, TISSUE_OPEN_R,  RankFilters.MAX)  // opening
+    def sourceTissue = loadStrictBinaryMask(declared.tissue_mask._file, mw, mh,
+                                            "external tissue mask for " + slideFile.name)
+    def sourceAirway = loadStrictBinaryMask(declared.airway_mask._file, mw, mh,
+                                            "external airway mask for " + slideFile.name)
+    byte[] tissuePixels = (byte[]) sourceTissue.getPixels()
+    byte[] airwayPixels = (byte[]) sourceAirway.getPixels()
+    byte[] finalPixels = new byte[tissuePixels.length]
+    for (int i = 0; i < tissuePixels.length; i++) {
+      boolean inTissue = (tissuePixels[i] & 0xFF) == 255
+      boolean inAirway = (airwayPixels[i] & 0xFF) == 255
+      if (inTissue) rawTissuePx++
+      if (inAirway) airwayPx++
+      if (inAirway && !inTissue)
+        failRun("External airway mask is not a subset of the tissue mask for " +
+                slideFile.name + " at linear pixel index " + i)
+      if (inTissue && !inAirway) finalPixels[i] = (byte) 255
+    }
+    bp = new ByteProcessor(mw, mh, finalPixels, null)
+
+    File sourceTissueCopy = new File(referenceDir, "source_tissue_mask.bin")
+    File sourceAirwayCopy = new File(referenceDir, "source_airway_mask.bin")
+    def sourceTissueContent = publishFileAtomically(
+        declared.tissue_mask._file, sourceTissueCopy, "external tissue mask")
+    def sourceAirwayContent = publishFileAtomically(
+        declared.airway_mask._file, sourceAirwayCopy, "external airway mask")
+    if (sourceTissueContent.sha256 != declared.tissue_mask.sha256 ||
+        sourceTissueContent.size_bytes != declared.tissue_mask.size_bytes ||
+        sourceAirwayContent.sha256 != declared.airway_mask.sha256 ||
+        sourceAirwayContent.size_bytes != declared.airway_mask.size_bytes)
+      failRun("Reference masks changed between profile validation and Stage 1 publication")
+    File finalMaskFile = new File(referenceDir, "analysis_tissue_minus_airway_mask.tif")
+    def finalMaskContent = publishBinaryMaskTiff(
+        bp, finalMaskFile, "analysis tissue-minus-airway mask")
+    referenceArtifactsToVerify.addAll([
+      [file: sourceTissueCopy, content: sourceTissueContent, label: "published tissue source mask"],
+      [file: sourceAirwayCopy, content: sourceAirwayContent, label: "published airway source mask"],
+      [file: finalMaskFile, content: finalMaskContent, label: "analysis tissue-minus-airway mask"]
+    ])
+    referenceSpaceRecord = [
+      mode: "external_binary_reference_masks",
+      authority: "content_bound_external_profile_and_binary_masks",
+      profile_id: referenceMaskProfile.profile_id,
+      profile_sha256: referenceMaskProfile.content.sha256,
+      review_state: referenceMaskProfile.review_state,
+      review_protocol_id: referenceMaskProfile.review_protocol_id,
+      coordinate_space: referenceMaskProfile.coordinate_space,
+      mask_logic: referenceMaskProfile.mask_logic,
+      sampling_semantics: "exhaustive_grid_over_declared_reference_space",
+      airway_excluded: true,
+      downsample: TISSUE_DS, mask_width: mw, mask_height: mh,
+      tissue_foreground_px_before_airway_exclusion: rawTissuePx,
+      airway_foreground_px: airwayPx,
+      source_tissue_mask: [
+        profile_relative_path: declared.tissue_mask.relative_path,
+        published_relative_path: "reference_space/" + sourceTissueCopy.name,
+        content: sourceTissueContent
+      ],
+      source_airway_mask: [
+        profile_relative_path: declared.airway_mask.relative_path,
+        published_relative_path: "reference_space/" + sourceAirwayCopy.name,
+        content: sourceAirwayContent
+      ],
+      tissue_mask: [published_relative_path: "reference_space/" + finalMaskFile.name,
+                    content: finalMaskContent]
+    ]
+  }
   long fgPx = Px.countForeground(bp)
   if (fgPx <= 0)
-    failRun("Tissue detection found NO foreground in " + slideFile.name +
-            " (Otsu threshold " + thr + "). Refusing to emit an empty tiling.")
+    failRun("The declared tissue reference space contains no analyzable foreground in " +
+            slideFile.name + ". Refusing to emit an empty tiling.")
+  referenceSpaceRecord.analysis_tissue_foreground_px = fgPx
   def simple = Px.toSimpleImage(bp, mw, mh)
 
   // Pass the SAME downsample into the RegionRequest: createTracedGeometry then
@@ -575,13 +1143,21 @@ slides.each { slideFile ->
   def req = RegionRequest.createInstance(server.getPath(), TISSUE_DS, 0, 0, W, H)
   Geometry g = ContourTracing.createTracedGeometry(simple, 0.5d, Double.POSITIVE_INFINITY, req)
   double minFragPx = (MIN_FRAG_MM2 * 1e6) / pxAreaUm2
-  g = GeometryTools.removeFragments(g, minFragPx)
-  if (FILL_HOLES) g = GeometryTools.removeInteriorRings(g, minFragPx)
+  if (referenceMaskProfile == null) {
+    g = GeometryTools.removeFragments(g, minFragPx)
+    if (FILL_HOLES) g = GeometryTools.removeInteriorRings(g, minFragPx)
+  }
   g = GeometryTools.constrainToBounds(g, 0, 0, W, H)
   if (g == null || g.isEmpty()) failRun("Tissue geometry empty after cleanup for " + slideFile.name)
   double tissueMm2 = g.getArea() * pxAreaUm2 / 1e6
-  logMsg(String.format("  tissue: Otsu=%.2f  mask=%.2f%%  area=%.2f mm2  (%d ms)",
-      thr, 100.0 * fgPx / (mw * (double) mh), tissueMm2, System.currentTimeMillis() - t0))
+  if (referenceMaskProfile == null) {
+    logMsg(String.format("  tissue: Otsu=%.2f  mask=%.2f%%  area=%.2f mm2  (%d ms)",
+        thr, 100.0 * fgPx / (mw * (double) mh), tissueMm2, System.currentTimeMillis() - t0))
+  } else {
+    logMsg(String.format("  reference masks: tissue=%d px airway=%d px analyzable=%d px " +
+        "(%.2f%%) area=%.2f mm2  (%d ms)", rawTissuePx, airwayPx, fgPx,
+        100.0 * fgPx / (mw * (double) mh), tissueMm2, System.currentTimeMillis() - t0))
+  }
 
   // ---- damaged-alveolar territory (endpoint denominator) ----------------
   // AT1-INTACT territory = where AGER+ pixels occupy at least DAMAGE_CUTOFF of
@@ -643,29 +1219,66 @@ slides.each { slideFile ->
   }
 
   // ---- tile grid --------------------------------------------------------
-  def slideOut = new File(outRoot, stem)
   def tilesDir = new File(slideOut, "tiles")
-  tilesDir.mkdirs()
+  if (!tilesDir.mkdir()) failRun("Could not create tiles directory: " + tilesDir.absolutePath)
   def prep = new PreparedGeometryFactory().create(g)
 
   def manifestRows = []
+  def candidateRows = []
   def rasterAreaPx = [:]        // tileId -> [core:, damaged:] as RASTERISED pixels
   double coreTissueTotalPx = 0.0d
-  int nWritten = 0, nSkipped = 0, nResumed = 0
+  int nWritten = 0, nResumed = 0
+  int nOutsideTissue = 0, nSkippedLowTissue = 0, nSkippedEmptyRaster = 0
   long tExport = System.currentTimeMillis()
 
   boolean capped = false
-  for (int cy = 0; cy < H && !capped; cy += CORE_PX) {
+  int nExcludedByCap = 0
+  for (int cy = 0; cy < H; cy += CORE_PX) {
     for (int cx = 0; cx < W; cx += CORE_PX) {
-      if (MAX_TILES > 0 && manifestRows.size() >= MAX_TILES) { capped = true; break }
       int cw = Math.min(CORE_PX, W - cx)
       int chh = Math.min(CORE_PX, H - cy)
+      String tileId = String.format("x%06d_y%06d", cx, cy)
+      def candidateBase = [
+        tile_id: tileId, core_x: cx, core_y: cy, core_w: cw, core_h: chh,
+        core_tissue_area_px: 0.0d, core_tissue_area_um2: 0.0d
+      ]
+      if (MAX_TILES > 0 && manifestRows.size() >= MAX_TILES) {
+        capped = true
+        nExcludedByCap++
+        candidateRows << candidateBase + [
+          status: "excluded_by_max_tiles_cap",
+          reason: "candidate_not_evaluated_after_IFQ_WSI_MAX_TILES_PER_SLIDE"
+        ]
+        continue
+      }
       def rect = GeometryTools.createRectangle(cx, cy, cw, chh)
-      if (!prep.intersects(rect)) continue
+      if (!prep.intersects(rect)) {
+        nOutsideTissue++
+        candidateRows << candidateBase + [
+          status: "outside_tissue", reason: "no_intersection_with_global_tissue_mask"
+        ]
+        continue
+      }
       Geometry gi = polygonal(g.intersection(rect))
-      if (gi == null || gi.isEmpty()) continue
+      if (gi == null || gi.isEmpty()) {
+        nOutsideTissue++
+        candidateRows << candidateBase + [
+          status: "outside_tissue", reason: "empty_global_tissue_intersection"
+        ]
+        continue
+      }
       double coreTissuePx = gi.getArea()
-      if (coreTissuePx * pxAreaUm2 < MIN_TISSUE_UM2) { nSkipped++; continue }
+      double coreTissueUm2 = coreTissuePx * pxAreaUm2
+      candidateBase.core_tissue_area_px = coreTissuePx
+      candidateBase.core_tissue_area_um2 = coreTissueUm2
+      if (coreTissueUm2 < MIN_TISSUE_UM2) {
+        nSkippedLowTissue++
+        candidateRows << candidateBase + [
+          status: "below_minimum_tissue",
+          reason: "core_tissue_area_below_IFQ_WSI_MIN_TILE_TISSUE_UM2"
+        ]
+        continue
+      }
       // Geometric damaged area for this core, used as the resume-path fallback.
       double coreDamagedPx = 0.0d
       if (PARTITION && gDamaged != null && !gDamaged.isEmpty()) {
@@ -680,14 +1293,11 @@ slides.each { slideFile ->
       int ey2 = Math.min(H, cy + chh + HALO_PX)
       int ew = ex2 - ex, eh = ey2 - ey
 
-      String tileId   = String.format("x%06d_y%06d", cx, cy)
       String tileBase = stem.replaceAll(/[^A-Za-z0-9._-]+/, "-") + "_" + tileId
       def tileFile    = new File(tilesDir, tileBase + ".ome.tif")
       // IF_Quant_Pipeline strips ONLY the final extension, so the companion for
       // "foo.ome.tif" must be "foo.ome_RoiSet.zip" -- NOT "foo_RoiSet.zip".
       def roiFile     = new File(tilesDir, tileBase + ".ome_RoiSet.zip")
-
-      coreTissueTotalPx += coreTissuePx
 
       boolean haveTile = RESUME && tileFile.isFile() && tileFile.length() > 0 && roiFile.isFile()
       if (haveTile) {
@@ -756,7 +1366,14 @@ slides.each { slideFile ->
                     " outside the " + ew + "x" + eh + " tile. Stage 2 would reject it.")
           entries << [name: reg.name, roi: ir]
         }
-        if (entries.isEmpty()) { nSkipped++; continue }
+        if (entries.isEmpty()) {
+          nSkippedEmptyRaster++
+          candidateRows << candidateBase + [
+            status: "empty_raster",
+            reason: "global_tissue_geometry_rasterized_to_no_roi_pixels"
+          ]
+          continue
+        }
 
         def zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(roiFile)))
         try {
@@ -788,6 +1405,12 @@ slides.each { slideFile ->
         nWritten++
       }
 
+      coreTissueTotalPx += coreTissuePx
+      candidateRows << candidateBase + [
+        status: (DRY_RUN ? "dry_run" : (haveTile ? "resumed" : "exported")),
+        reason: (DRY_RUN ? "tile_export_suppressed_by_IFQ_WSI_DRY_RUN" :
+                 (haveTile ? "existing_tile_and_roi_reused" : "stage1_tile_and_roi_written"))
+      ]
       manifestRows << [
         tile_id: tileId, tile_file: tileFile.name, roiset_file: roiFile.name,
         slide_stem: stem, source_vsi: slideFile.name,
@@ -798,7 +1421,7 @@ slides.each { slideFile ->
         halo_left: cx - ex, halo_top: cy - ey,
         halo_right: ex2 - (cx + cw), halo_bottom: ey2 - (cy + chh),
         core_tissue_area_px: coreTissuePx,
-        core_tissue_area_um2: coreTissuePx * pxAreaUm2,
+        core_tissue_area_um2: coreTissueUm2,
         // Rasterised areas are what Stage 2 actually measures (the engine counts
         // ROI pixels), so Stage 3 reconciles against these, not the polygon area.
         // A RESUMED tile was not rasterised in this run, so fall back to the
@@ -818,22 +1441,36 @@ slides.each { slideFile ->
     }
   }
 
+  // The candidate ledger is the sampling-frame record. It includes grid cores
+  // that never become Stage 2 inputs; tile_manifest.csv remains restricted to
+  // physical tile/ROI pairs so downstream exact-cover checks stay meaningful.
+  def candidateCols = candidateRows[0].keySet() as List
+  def candidateCsv = new StringBuilder(csvRow(candidateCols)).append("\n")
+  candidateRows.each { r ->
+    candidateCsv.append(csvRow(candidateCols.collect { c -> r[c] })).append("\n")
+  }
+  def candidateManifestFile = new File(slideOut, "tile_candidate_manifest.csv")
+  candidateManifestFile.setText(candidateCsv.toString(), "UTF-8")
+
   if (manifestRows.isEmpty())
     failRun("No tiles intersect tissue for " + slideFile.name + " -- refusing to emit an empty run.")
 
   // ---- reconciliation: per-tile core areas must sum to the slide tissue ----
   double sumMm2 = coreTissueTotalPx * pxAreaUm2 / 1e6
   double relDiff = Math.abs(sumMm2 - tissueMm2) / tissueMm2
-  logMsg(String.format("  tiles=%d written=%d resumed=%d skipped(<%.0f um2)=%d   (%d ms)",
-      manifestRows.size(), nWritten, nResumed, MIN_TISSUE_UM2, nSkipped,
+  logMsg(String.format("  tiles=%d written=%d resumed=%d outside=%d below-min(<%.0f um2)=%d empty-raster=%d   (%d ms)",
+      manifestRows.size(), nWritten, nResumed, nOutsideTissue,
+      MIN_TISSUE_UM2, nSkippedLowTissue, nSkippedEmptyRaster,
       System.currentTimeMillis() - tExport))
   logMsg(String.format("  SEAM CHECK: sum(core tissue) = %.4f mm2 vs slide tissue %.4f mm2  (rel diff %.3e)",
       sumMm2, tissueMm2, relDiff))
   if (capped) {
     logMsg("  *** CAPPED at IFQ_WSI_MAX_TILES_PER_SLIDE=" + MAX_TILES +
            " -- SMOKE TEST ONLY, coverage is incomplete and the seam check above is expected to fail. ***")
-  } else if (relDiff > 1e-6 && nSkipped == 0) {
-    logMsg("  WARNING: core areas do not sum to the slide tissue area. Cores must tile the slide exactly.")
+  } else if (relDiff > 1e-6 && nSkippedLowTissue == 0 && nSkippedEmptyRaster == 0) {
+    failRun("Tile/reference area reconciliation failed for " + slideFile.name +
+            ": relative difference " + relDiff + " exceeds 1e-6. " +
+            "Refusing to declare complete Stage 1 coverage.")
   }
 
   // ---- samplesheet.csv, written INTO the tiles folder (= Stage 2 INPUT_DIR) --
@@ -850,28 +1487,99 @@ slides.each { slideFile ->
   new File(slideOut, "tile_manifest.csv").setText(mf.toString(), "UTF-8")
 
   totalTiles += manifestRows.size()
+  boolean coverageComplete = !capped && !DRY_RUN &&
+      nSkippedLowTissue == 0 && nSkippedEmptyRaster == 0 && relDiff <= 1e-6
+  server.close()
+  def sourcePackageAfter = withRetry("source package post-run verification", 3) {
+    buildSourcePackage(slideFile)
+  }
+  if (sourcePackageAfter != sourcePackageBefore)
+    failRun("Bio-Formats source-package membership or bytes changed during Stage 1 for " +
+            slideFile.name + "; refusing to publish stage1_manifest.json")
+  referenceArtifactsToVerify.each { artifact ->
+    def after = contentRecord(artifact.file, artifact.label + " post-run verification")
+    if (after.size_bytes != artifact.content.size_bytes || after.sha256 != artifact.content.sha256)
+      failRun(artifact.label + " changed while Stage 1 was active; refusing to publish the manifest")
+  }
+  if (referenceMaskProfile != null) {
+    def declared = referenceMaskProfile.slides[slideFile.name]
+    [[artifact: declared.tissue_mask, label: "external tissue mask"],
+     [artifact: declared.airway_mask, label: "external airway mask"]].each { item ->
+      def after = contentRecord(item.artifact._file, item.label + " post-run verification")
+      if (after.size_bytes != item.artifact.size_bytes || after.sha256 != item.artifact.sha256)
+        failRun(item.label + " changed while Stage 1 was active; refusing to publish the manifest")
+    }
+  }
+  referenceSpaceRecord.content_verified_before_and_after = true
   runRecord.slides << [
     source_vsi: slideFile.name, slide_stem: stem,
+    source_package: sourcePackageBefore,
     series_index: chosen.series, series_name: chosen.name,
     width: W, height: H, pixel_size_um: pxUm, pixel_size_um_y: pxUmH, n_channels: chosen.nChannels,
     channel_names: chosen.channelNames,
+    ordered_channel_names: chosen.channelNames,
+    ordered_channel_patterns: ORDERED_CHANNEL_PATTERN_TEXTS,
+    channel_order_authority: "acquisition_order_pattern_only_not_biological_identity",
     tissue_threshold_otsu: thr, tissue_area_mm2: tissueMm2,
+    reference_space: referenceSpaceRecord,
     sum_core_tissue_mm2: sumMm2, seam_check_rel_diff: relDiff,
     n_tiles: manifestRows.size(), n_written: nWritten, n_resumed: nResumed,
-    n_skipped_low_tissue: nSkipped,
-    coverage_complete: !capped, max_tiles_cap: MAX_TILES, dry_run: DRY_RUN,
+    tile_candidate_manifest: candidateManifestFile.name,
+    n_grid_cores_total: (int)(Math.ceil(W / (double)CORE_PX) * Math.ceil(H / (double)CORE_PX)),
+    n_grid_cores_visited: candidateRows.size(),
+    n_outside_tissue: nOutsideTissue,
+    n_skipped_low_tissue: nSkippedLowTissue,
+    n_skipped_empty_raster: nSkippedEmptyRaster,
+    n_candidate_exported: candidateRows.count { it.status == "exported" },
+    n_candidate_resumed: candidateRows.count { it.status == "resumed" },
+    n_candidate_dry_run: candidateRows.count { it.status == "dry_run" },
+    n_candidate_excluded_by_cap: nExcludedByCap,
+    coverage_complete: coverageComplete, max_tiles_cap: MAX_TILES, dry_run: DRY_RUN,
     mouse_id: md.mouse_id, genotype: md.genotype, condition: md.condition,
     tiles_dir: tilesDir.getAbsolutePath()
   ]
-  server.close()
 }
 
-new File(outRoot, "stage1_manifest.json").setText(GsonTools.getInstance(true).toJson(runRecord), "UTF-8")
+if (referenceMaskProfile != null) {
+  def profileAfter = contentRecord(
+      referenceMaskProfile.file, "reference-mask profile post-run verification")
+  def publishedProfileAfter = contentRecord(
+      new File(outRoot, publishedReferenceProfile.published_relative_path),
+      "published reference-mask profile post-run verification")
+  if (profileAfter.size_bytes != referenceMaskProfile.content.size_bytes ||
+      profileAfter.sha256 != referenceMaskProfile.content.sha256 ||
+      publishedProfileAfter.size_bytes != referenceMaskProfile.content.size_bytes ||
+      publishedProfileAfter.sha256 != referenceMaskProfile.content.sha256)
+    failRun("Reference-mask profile changed while Stage 1 was active; refusing to publish the manifest")
+}
+
+def stage1ScriptRecordAfter = [
+  name: stage1ScriptFile.name,
+  size_bytes: stage1ScriptFile.length(),
+  sha256: ContentHash.sha256File(stage1ScriptFile)
+]
+if (stage1ScriptRecordAfter != stage1ScriptRecord)
+  failRun("The executed Stage 1 script changed while the run was active; refusing to " +
+          "publish stage1_manifest.json")
+
+def stage1ManifestPath = new File(outRoot, "stage1_manifest.json").toPath()
+def stage1ManifestTemp = Files.createTempFile(outRoot.toPath(), ".stage1_manifest.", ".tmp")
+try {
+  Files.write(stage1ManifestTemp,
+      GsonTools.getInstance(true).toJson(runRecord).getBytes(StandardCharsets.UTF_8))
+  try {
+    Files.move(stage1ManifestTemp, stage1ManifestPath, StandardCopyOption.ATOMIC_MOVE)
+  } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+    Files.move(stage1ManifestTemp, stage1ManifestPath)
+  }
+} finally {
+  Files.deleteIfExists(stage1ManifestTemp)
+}
 
 logMsg("")
 logMsg("=================================================================")
 logMsg("DONE. " + slides.size() + " slide(s), " + totalTiles + " tiles -> " + outRoot.getAbsolutePath())
-logMsg("Wrote stage1_manifest.json and, per slide, tile_manifest.csv + tiles/samplesheet.csv")
+logMsg("Wrote stage1_manifest.json and, per slide, tile_candidate_manifest.csv + tile_manifest.csv + tiles/samplesheet.csv")
 logMsg("")
 logMsg("NEXT (Stage 2) -- per slide, against the UNMODIFIED engine:")
 logMsg("  IFQ_INPUT_DIR=<slide>/tiles  IFQ_OUTPUT_DIR=<slide>/analysis")

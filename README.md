@@ -82,8 +82,9 @@ blobs — the same signature the real data showed.
 implementation computed KRT5⁺PDPN**⁻**; the reference specifies KRT5⁺PDPN**⁺**
 over a hand-traced PDPN⁻ ∪ KRT5⁺ union. PDPN is expressed *by* dysplastic cells,
 so requiring PDPN-negativity had been excluding the population being measured.
-The evaluator now **refuses to run** the corrected spec rather than dividing by a
-denominator it cannot build.
+The evaluator now builds the exact mask algebra, but **refuses reportable use**
+while the PDPN/T1A threshold and anatomical reference space are uncalibrated;
+an explicit override is labelled engineering-only.
 
 **6 · The current design cannot test the genotype hypothesis.**
 Genotype and condition are crossed in the terminal imaging cohort, but n = 1
@@ -149,7 +150,7 @@ embedded engine has drifted from the version it claims equivalence to.
 | **Descriptive only** | the four-animal KRT5⁺ area table above, as *per-animal* values. The **M2 vs M4-1 ordering is not** descriptive-only and is listed below |
 | **Provisional / exploratory** | KRT5=300 rests on one sound control and must be re-derived; AGER and T1α calls have no negative-control anchor and are labelled `adaptive_otsu_exploratory` |
 | **Retracted / superseded** | AGER as a co-negativity marker · KRT8 as a discriminator · the KRT5⁺PDPN⁻ endpoint form |
-| **Not established** | **the M2 vs M4-1 KRT5 ordering** — the whole-section dominance curve crosses at threshold ≈400 and the swing across plausible thresholds (2.93 pp) exceeds the difference in dispute (2.13 pp); see [NEGATIVE_RESULTS §5](docs/NEGATIVE_RESULTS.md) · any genotype-level inference · a defensible corrected endpoint (executor implemented, T1A/PDPN uncalibrated and manual validation absent) · routes 1 and 2 end-to-end through the launcher UI |
+| **Not established** | **the M2 vs M4-1 KRT5 ordering** — the whole-section dominance curve crosses at threshold ≈400 and the swing across plausible thresholds (2.93 pp) exceeds the difference in dispute (2.13 pp); see [NEGATIVE_RESULTS §5](docs/NEGATIVE_RESULTS.md) · any genotype-level inference · a defensible corrected endpoint (executor implemented, T1A/PDPN uncalibrated and manual validation absent) · a reviewed uncapped WSI endpoint · a biologically benchmarked StarDist model |
 
 An explicitly labelled engineering run of the corrected algebra now exists at
 `D:\IFQ_Runs\confocal_260809_rerun`; it is not a reportable endpoint result.
@@ -225,6 +226,10 @@ $java = (Get-ChildItem 'X:\Fiji\java' -Recurse -Filter java.exe | Select-Object 
   --run '<repo>\IF_Quant_Pipeline.groovy'
 
 python aggregate_to_mouse.py 'D:\IFQ_Runs\<run>\analysis\run_summary.csv'
+
+# Optional schema-v2 record gate for a reviewed, explicit direct-confocal map
+python aggregate_to_mouse.py 'D:\IFQ_Runs\<run>\analysis\run_summary.csv' `
+  --sampling-unit field --measurement-record-spec '<reviewed-record-spec>.json'
 ```
 
 On Windows ARM64 the Fiji launcher `.exe` itself does not start; invoking the
@@ -235,7 +240,7 @@ bundled JVM directly, as above, is the working path.
 ```powershell
 # Stage 1 — QuPath tiles the slide (measures nothing)
 $env:IFQ_WSI_INPUT  = 'D:\Confocal_Images\<slides>'   # .vsi file or folder; .ets is refused
-$env:IFQ_WSI_OUTPUT = 'D:\IFQ_Runs\<run>'
+$env:IFQ_WSI_OUTPUT = 'D:\IFQ_Runs\<new_empty_run>'
 & 'X:\QuPath\QuPath-0.7.0 (console).exe' script qupath_wsi_tile_export.groovy
 
 # Stage 2 — the same Fiji engine measures the tiles, sharded across cores
@@ -250,25 +255,51 @@ python aggregate_tiles_to_slide.py --slide-root 'D:\IFQ_Runs\<run>'
 python aggregate_to_mouse.py 'D:\IFQ_Runs\<run>\stats\slide_level_summary.csv'
 ```
 
+Successful Stage 3 and Stage 4 publications include content-addressed audit
+records (`slide_level_summary.audit.json` and
+`mouse_group_aggregation.audit.json`). Each is written last, after the atomic
+canonical CSV writes, and binds exact code, inputs, outputs, arguments, Python
+runtime, and UTC completion time. Stage 4 requires and revalidates the Stage 3
+audit for WSI input; direct-confocal input remains supported without inventing
+an upstream Stage 3 record.
+
+Stage 4 can additionally take `--measurement-record-spec` to publish an atomic
+`measurement_records.jsonl` sidecar. This path requires exact panel profiles,
+identifier columns, numerator/denominator columns, units, sampling,
+compartment, QC, and provenance; it calls the shared aggregation-eligibility
+contract before mouse pooling. It never discovers endpoints by suffix or turns
+missing values into zero. See
+[`docs/MEASUREMENT_RECORD_INTEGRATION.md`](docs/MEASUREMENT_RECORD_INTEGRATION.md).
+
 Stage 3 consumes only the explicit hashed Stage 2 index. It refuses to emit an
 analytical summary when tiles are missing, shard assignments overlap, duplicate
 section/region identities exist, or an input, ROI, script, configuration,
-manifest, or summary hash has drifted. It also rejects an emitted additive
-marker column that is blank when the indexed panel signature declares that
-marker; a true measured zero must be written as `0`. Stage 2 does **not** set thresholds:
+parameter, candidate-ledger, manifest, runtime profile, or summary declaration
+has drifted. It also rejects an emitted additive marker column that is blank
+when the indexed panel signature declares that marker; a true measured zero
+must be written as `0`. Stage 2 does **not** set thresholds:
 pass calibrated values, or the engine falls back to per-tile adaptive Otsu,
 which on a mostly-background tile reports `KRT5_pod_area_frac ≈ 0.89`.
 Stage 4 also rejects stale/rejected slide tables, preserves unavailable
 panel-specific markers as blanks rather than zeros, and carries the indexed
 profile lineage into mouse- and group-level output.
 
+Stage 1 requires a new or empty output root, disables existence-only resume,
+and records every grid core in `tile_candidate_manifest.csv`. Its ordered
+channel patterns check acquisition-label order only; they do not infer
+biological marker identity from wavelength or fluorescence colour. Capped,
+dry-run, low-tissue-skipping, or empty-raster runs are explicit engineering
+outputs and cannot be indexed for analytical aggregation.
+
 ### Requirements
 
 - **[Fiji](https://fiji.sc/)** — hosts the measurement engine; required for both
   routes. Bio-Formats is bundled.
 - **[QuPath](https://qupath.github.io/) 0.7+** — whole-slide route only.
-- **StarDist + CSBDeep** update sites — recommended for nuclei; without them set
-  `IFQ_SEGMENTER=classic` (watershed fallback, and the only headless-safe mode).
+- **StarDist + CSBDeep** update sites — optional. The software route is
+  headless and content-bound only when an explicit model archive and sealed
+  runtime manifest are supplied; biological model validation remains required.
+  See [`docs/STARDIST_RUNTIME.md`](docs/STARDIST_RUNTIME.md).
 - **Python 3**, standard library only, for both aggregation scripts.
 - Windows ARM64 or x64 with .NET Framework 4.x for the launcher.
 
@@ -282,6 +313,7 @@ profile lineage into mouse- and group-level output.
 | `scripts/build_stage2_run_index.py` / `schemas/stage2-run-index.schema.json` | Portable content-addressed declaration of the only Stage 2 artifacts allowed into Stage 3. |
 | `aggregate_tiles_to_slide.py` | Stage 3: declared tile/region outputs → slide, with hash, identity, coverage, and area reconciliation; recursive discovery is diagnostic-only. |
 | `aggregate_to_mouse.py` | Region → mouse → group, area-weighted. Reports `n_mice`. Computes no p-values on purpose. |
+| `ifquant/route_records.py` | Explicit Stage 4 bridge from reviewed panel/endpoint maps to schema-v2 JSONL; validates eligibility before pooling. |
 | `endpoints/` | Relational endpoints (a relation *between* two markers) evaluated by boolean algebra on masks the engine already wrote. The engine is marker-wise and cannot express this; the endpoint scripts close that gap without modifying it. |
 | `config/endpoints/` | Endpoint specifications as reviewable, diffable data — including the superseded one and why it was superseded. |
 | `config/lung_marker_registry.json` | Marker aliases, localisation, analytical-role defaults. Not a whitelist and not a diagnostic classifier. |
@@ -423,11 +455,11 @@ control-derived `IFQ_<MARKER>_THRESHOLD` values.
 | Read original files via Bio-Formats, keep metadata and calibration | `bfOpen()` — no autoscale |
 | Split channels, preserve Z-stack and calibration | `ChannelSplitter.split` + `projectChannel` (calibration re-applied) |
 | Tissue / lesion ROIs | `resolveTissueRois()` — manual `RoiSet.zip`/`.roi` if present, else auto from DAPI |
-| Nuclei and cells | `segmentNuclei()` — StarDist preferred, classic watershed fallback; perinuclear ring is the "cell" |
+| Nuclei and cells | `segmentNuclei()` — classic watershed is the default; sealed StarDist uses the official headless label-Dataset output; the perinuclear ring is the "cell" |
 | KRT5⁺ pod area and counts | independent threshold mask → `positiveAreaInRoi` + Analyze Particles |
 | Membrane markers (AGER / PDPN / T1A) | ring/membrane support measurement |
 | Relations between two markers | `endpoints/evaluate_endpoints.groovy`, mask algebra outside the engine |
-| Every threshold, filter, plugin version, parameter | `*__params.json` + `run_manifest.json`; resolved thresholds also in `run_summary.csv` |
+| Thresholds, filters, parameters, and queryable runtime versions | `*__params.json` + `run_manifest.json`; resolved thresholds also in `run_summary.csv`. Active StarDist runs bind the model, runtime manifest, plugin/runtime artifacts, loaded class origins, and label outputs by SHA-256. |
 
 ## Input data expectations
 
@@ -455,8 +487,10 @@ a previous run being mixed with new ones. Set
 | Parameter | Meaning |
 |---|---|
 | `IFQ_PANEL_MAP_PATH` | `relative_path,panel` CSV for strict per-image routing; generated by launcher AUTO and copied into results |
-| `IFQ_SEGMENTER` | `stardist` (preferred) or `classic` watershed (headless-safe) |
-| `STARDIST_PROB` / `STARDIST_NMS` | detection probability / overlap thresholds |
+| `IFQ_SEGMENTER` | `classic` watershed (default) or sealed, headless `stardist`; StarDist additionally requires both paths below |
+| `IFQ_STARDIST_MODEL_PATH` | exact exported StarDist `.zip` model; required and byte-bound when `IFQ_SEGMENTER=stardist` |
+| `IFQ_STARDIST_RUNTIME_MANIFEST` | closed JSON manifest for exact StarDist, CSBDeep, TensorFlow Java, and native-runtime files; see [`docs/STARDIST_RUNTIME.md`](docs/STARDIST_RUNTIME.md) |
+| `IFQ_STARDIST_PROB` / `IFQ_STARDIST_NMS` / `IFQ_STARDIST_TILES` | StarDist detection probability, overlap threshold, and tiling count; all are range-checked and recorded |
 | `IFQ_PROJECTION` | `max` (CLI default), `layer_aware` marker-specific slabs, `sum`, `avg`, `single` |
 | `IFQ_SINGLE_PLANE` | 1-based plane index when projection is `single`; `-1` = middle |
 | `IFQ_Z_NUCLEAR_RANGE` / `IFQ_Z_CELL_BODY_RANGE` / `IFQ_Z_APICAL_RANGE` | `full`, `auto`, or inclusive `start:end` |
@@ -561,7 +595,7 @@ group results would be wrong regardless of how they were computed.
 2. Open the `__QC.png` and `__CALL_QC.png` overlays. Are nuclei split correctly?
    Do positives sit where you would put them by eye? Check the nucleus
    acceptance/rejection fractions, not only the picture.
-3. Adjust: under-segmented nuclei → `STARDIST_PROB` / `STARDIST_NMS`; too
+3. Adjust: under-segmented nuclei → `IFQ_STARDIST_PROB` / `IFQ_STARDIST_NMS`; too
    many/few positives → `POS_SENSITIVITY[marker]`; pod mask too greedy or sparse
    → `POD_THRESH_METHOD`, `POD_BLUR_SIGMA_PX`, `POD_MIN_AREA_UM2`.
 4. Derive fixed cutoffs from **controls only**, without consulting the
@@ -598,9 +632,12 @@ Every run records ImageJ, Bio-Formats, Java and OS versions
 (`run_manifest.json`); the full configuration including segmenter, projection,
 `blackBackground`, tissue method and sensitivities; per-image calibration and
 channel→marker map; and the **resolved numeric thresholds** for pods and each
-marker. StarDist/CSBDeep model and parameters are captured; exact plugin build
-strings are not reliably queryable from a script and must be noted from
-`Help ▸ Update`.
+marker. Active StarDist runs require an explicit `.zip` model and a closed
+runtime manifest. The engine verifies their bytes, every declared plugin/runtime
+artifact, and loaded Java class origin before and after computation. Per-region
+label-image content and canonical label pixels are also hashed. This closes the
+software provenance path; reportable StarDist use still requires blinded
+biological validation of the selected model and thresholds.
 
 ## Troubleshooting
 
@@ -610,7 +647,7 @@ strings are not reliably queryable from a script and must be noted from
 | `OUTPUT_DIR is not empty` | use a new run directory; do not mix old and new masks |
 | `No images matched` | `IFQ_INCLUDE_REGEX` is a full match against the absolute path |
 | `Found N channels but panel references channel M` | fix the panel `idx` map or samplesheet panel; the image is recorded as failed |
-| StarDist errors / not found | install CSBDeep + StarDist, or set `IFQ_SEGMENTER=classic` |
+| StarDist errors / not found | install CSBDeep + StarDist, supply a schema-valid sealed runtime manifest plus model `.zip`, or set `IFQ_SEGMENTER=classic` |
 | Nucleus counts implausibly low, masks look like rim fragments | the `blackBackground` failure mode; check that candidate components are not ~100 % border-touching, and see `IF_Quant_Pipeline.groovy:1765-1783` |
 | Areas inverted or zero | the pipeline forces `blackBackground=true`; if you edited masking, keep foreground = 255 |
 | Densities 10–100× off | check the embedded calibration (µm/pixel) in the source files |

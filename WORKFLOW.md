@@ -773,6 +773,11 @@ $env:IFQ_MAX_IMAGES = '1'
 $env:IFQ_MORPHOLOGY_PRIMARY = 'true'
 ```
 
+`IFQ_MAX_IMAGES` is a QC/development cap, not an analytical sampling design.
+When it excludes matching candidates, the engine records every exclusion,
+sets `analytical_coverage_complete=false`, retains the partial outputs, and
+returns a failure so the run cannot enter aggregation as complete.
+
 Use a new, empty output directory for every run. A batch with no matching
 images exits with code 1. Per-image failures are retained in `run_manifest.json`
 and make the final manifest status `partial_failure` or `failed`; headless Fiji
@@ -844,6 +849,13 @@ Run:
 ```powershell
 uv run --no-project python aggregate_to_mouse.py analysis_output\run_name\run_summary.csv
 ```
+
+Stage 4 publishes `mouse_level_summary.csv` and `group_level_summary.csv`
+atomically, then writes `mouse_group_aggregation.audit.json` last with hashes
+of the exact input, aggregator, and outputs plus its runtime and arguments.
+Direct-confocal input does not require a Stage 3 audit. WSI input does: its
+sibling `slide_level_summary.audit.json` and every artifact declared there are
+revalidated before the mouse/group audit can be published.
 
 All inferential statistics use mouse-level rows. Sections, fields, regions, and
 nuclei are not independent biological replicates.

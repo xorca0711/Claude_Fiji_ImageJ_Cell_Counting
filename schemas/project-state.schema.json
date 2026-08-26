@@ -26,7 +26,7 @@
     },
     "schema_version": {
       "type": "string",
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "authority_revision": {
       "type": "string",
@@ -422,6 +422,7 @@
         },
         "status": {
           "enum": [
+            "ENGINEERING_COMPLETE",
             "OPEN_SCIENTIFIC_BLOCKER",
             "OPEN_ENGINEERING_GATE",
             "BLOCKED"

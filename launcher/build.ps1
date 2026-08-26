@@ -1,16 +1,15 @@
 <#
-    build.ps1 -- IF Quant Launcher v1.9.5
+    build.ps1 -- IF Quant Launcher v1.9.7
 
     Diff against the v1.7.2 build script, in full:
 
       1. THREE source files are compiled instead of one. csc takes a list, so
          nothing about the shape of the build changes; the launcher is still a
          single self-contained .exe with no external dependencies.
-      2. TWO extra resources are embedded: qupath_wsi_tile_export.groovy and
-         aggregate_tiles_to_slide.py. Route 2 needs them on an analysis machine
-         with no repository checkout, for exactly the reason v1.7.2 embedded the
-         pipeline. Both are optional at run time, so a build made without them
-         still starts and simply has no working route 2.
+      2. The complete Route 2 runtime tree is embedded: QuPath Stage 1, the
+         PowerShell sharded orchestrator, the Stage 2 index builder, Stage 3,
+         its aggregate_to_mouse dependency, the ifquant package and schemas.
+         The build fails if any required resource is absent.
       3. The compiler search adds FrameworkArm64. v1.7.2 looked only in
          Framework64 and Framework; on a win-arm64 machine Framework64 exists
          and works under emulation, so v1.7.2 builds -- but that is luck.
@@ -48,6 +47,34 @@ $resources = [ordered]@{
                     Id   = "IFQuant.qupath_wsi_tile_export.groovy" }
     "stage3"   = @{ Path = (Join-Path $repo "aggregate_tiles_to_slide.py")
                     Id   = "IFQuant.aggregate_tiles_to_slide.py" }
+    "mouse_aggregate" = @{ Path = (Join-Path $repo "aggregate_to_mouse.py")
+                           Id   = "IFQuant.aggregate_to_mouse.py" }
+    "stage2_orchestrator" = @{ Path = (Join-Path $repo "scripts\Invoke-Stage2Sharded.ps1")
+                               Id   = "IFQuant.Invoke-Stage2Sharded.ps1" }
+    "stage2_index_builder" = @{ Path = (Join-Path $repo "scripts\build_stage2_run_index.py")
+                                Id   = "IFQuant.build_stage2_run_index.py" }
+    "ifquant_init" = @{ Path = (Join-Path $repo "ifquant\__init__.py")
+                        Id   = "IFQuant.ifquant.__init__.py" }
+    "ifquant_adapters" = @{ Path = (Join-Path $repo "ifquant\adapters.py")
+                            Id   = "IFQuant.ifquant.adapters.py" }
+    "ifquant_contracts" = @{ Path = (Join-Path $repo "ifquant\contracts.py")
+                             Id   = "IFQuant.ifquant.contracts.py" }
+    "ifquant_route_records" = @{ Path = (Join-Path $repo "ifquant\route_records.py")
+                                 Id   = "IFQuant.ifquant.route_records.py" }
+    "ifquant_stage2_index" = @{ Path = (Join-Path $repo "ifquant\stage2_index.py")
+                                 Id   = "IFQuant.ifquant.stage2_index.py" }
+    "stage2_schema" = @{ Path = (Join-Path $repo "schemas\stage2-run-index.schema.json")
+                         Id   = "IFQuant.stage2-run-index.schema.json" }
+    "measurement_schema" = @{ Path = (Join-Path $repo "schemas\measurement-record.schema.json")
+                              Id   = "IFQuant.measurement-record.schema.json" }
+    "wsi_reference_mask_schema" = @{
+        Path = (Join-Path $repo "schemas\wsi-reference-mask-profile.schema.json")
+        Id   = "IFQuant.wsi-reference-mask-profile.schema.json"
+    }
+    "stardist_runtime_schema" = @{
+        Path = (Join-Path $repo "schemas\stardist-runtime-manifest.schema.json")
+        Id   = "IFQuant.stardist-runtime-manifest.schema.json"
+    }
 }
 
 foreach ($required in ($sources + @($manifest))) {
@@ -185,8 +212,9 @@ function Invoke-LauncherCheck {
 
 if (-not $SkipSelfTest) {
     # 0 = every embedded-artefact check, every route-model invariant and every
-    # fail-closed rule passed. Codes 10-28 are v1.7.2's; 30-43 are the route
-    # model and H1-H5. See RuntimeBundle.SelfTest / RouteSelfTest.
+    # fail-closed rule passed. Codes 10-29 are the original checks; 30-59 are the route,
+    # immutable-runtime, argv and process-containment checks.
+    # See RuntimeBundle.SelfTest / RouteSelfTest.
     $selfTest = Invoke-LauncherCheck -Exe $output -Mode "--self-test"
     if ($selfTest -ne 0) {
         Remove-Item -LiteralPath $output -Force
