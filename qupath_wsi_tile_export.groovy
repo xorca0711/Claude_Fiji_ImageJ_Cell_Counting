@@ -27,8 +27,8 @@
 //   * sum of per-tile core ROI areas == whole-slide tissue geometry area
 //
 // USAGE (headless):
-//   IFQ_WSI_INPUT=D:\Confocal_Images\...\slide.vsi  (file or folder of .vsi)
-//   IFQ_WSI_OUTPUT=D:\wsi_stage1
+//   IFQ_WSI_INPUT=D:\path\to\raw_slides\slide.vsi  (file or folder of .vsi)
+//   IFQ_WSI_OUTPUT=D:\IFQ_Runs\<run_name>
 //   "X:\QuPath\QuPath-0.7.0 (console).exe" script qupath_wsi_tile_export.groovy
 //
 // AREA endpoints are exact across seams. CELL COUNTS are NOT: the engine
@@ -118,6 +118,14 @@ def envBool = { String name, boolean fallback ->
 
 @groovy.transform.CompileStatic
 class ContentHash {
+  static String sha256Bytes(byte[] payload) {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    byte[] bytes = digest.digest(payload)
+    StringBuilder encoded = new StringBuilder(bytes.length * 2)
+    for (byte value : bytes) encoded.append(String.format("%02x", value & 0xff))
+    return encoded.toString()
+  }
+
   static String sha256File(File file) {
     MessageDigest digest = MessageDigest.getInstance("SHA-256")
     byte[] buffer = new byte[1024 * 1024]
@@ -305,6 +313,8 @@ def stage1ScriptRecord = [
 ]
 if (HALO_PX < 0)      failRun("IFQ_WSI_HALO_PX must be >= 0")
 if (CORE_PX <= 0)     failRun("IFQ_WSI_CORE_PX must be > 0")
+if (!(TISSUE_DS > 0) || !Double.isFinite(TISSUE_DS))
+  failRun("IFQ_WSI_TISSUE_DOWNSAMPLE must be finite and > 0; found " + TISSUE_DS)
 if (MIN_TISSUE_UM2 < 0 || !Double.isFinite(MIN_TISSUE_UM2))
   failRun("IFQ_WSI_MIN_TILE_TISSUE_UM2 must be finite and >= 0; found " + MIN_TISSUE_UM2)
 if (ROI_NAME.toLowerCase().contains("alveol")) {
@@ -450,6 +460,56 @@ def publishFileAtomically = { File source, File destination, String label ->
       sourceRecord.sha256 != publishedRecord.sha256)
     failRun(label + " published bytes do not match the declared source artifact")
   return publishedRecord
+}
+
+// Publish the mask's computational pixels independently of TIFF/container
+// metadata.  One byte represents one selected-series downsample-grid pixel in
+// row-major order, and only the canonical values 0 and 255 are permitted.
+def publishCanonicalMaskPixels = { byte[] pixels, int width, int height,
+                                   File destination, String label ->
+  long expectedLength = (long) width * (long) height
+  if (width <= 0 || height <= 0 || expectedLength != pixels.length)
+    failRun(label + " dimensions do not match its row-major pixel payload")
+  for (int i = 0; i < pixels.length; i++) {
+    int value = pixels[i] & 0xFF
+    if (value != 0 && value != 255)
+      failRun(label + " must contain only 0 and 255; found " + value +
+              " at linear pixel index " + i)
+  }
+  if (destination.exists())
+    failRun(label + " destination already exists: " + destination.absolutePath)
+  File parent = destination.parentFile
+  if (!parent.isDirectory() && !parent.mkdirs())
+    failRun("Could not create " + label + " directory: " + parent.absolutePath)
+  def temp = Files.createTempFile(parent.toPath(), ".ifq-mask-pixels-", ".tmp")
+  try {
+    FileOutputStream output = new FileOutputStream(temp.toFile(), false)
+    try {
+      output.write(pixels)
+      output.flush()
+      output.getFD().sync()
+    } finally {
+      output.close()
+    }
+    try {
+      Files.move(temp, destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+    } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+      Files.move(temp, destination.toPath())
+    }
+  } finally {
+    Files.deleteIfExists(temp)
+  }
+  def published = contentRecord(destination, label)
+  if (published.size_bytes != expectedLength ||
+      published.sha256 != ContentHash.sha256Bytes(pixels))
+    failRun(label + " published bytes do not match the canonical pixel payload")
+  return [
+    encoding: "row_major_uint8_0_255",
+    width: width,
+    height: height,
+    published_relative_path: "reference_space/" + destination.name,
+    content: published
+  ]
 }
 
 def loadStrictBinaryMask = { File file, int expectedWidth, int expectedHeight, String label ->
@@ -681,9 +741,22 @@ def loadReferenceMaskProfile = { String profilePath, List<File> inputSlides ->
   File profileFile = new File(profilePath)
   def profileContent = contentRecord(profileFile, "IFQ_WSI_REFERENCE_MASK_PROFILE")
   profileFile = profileFile.getCanonicalFile()
+  byte[] profileBytes
+  String profileText
   Map root
   try {
-    root = (Map) GsonTools.getInstance().fromJson(profileFile.getText("UTF-8"), Map.class)
+    profileBytes = Files.readAllBytes(profileFile.toPath())
+    def profileContentAfterRead = contentRecord(
+        profileFile, "IFQ_WSI_REFERENCE_MASK_PROFILE post-read verification")
+    if (profileContentAfterRead != profileContent ||
+        ContentHash.sha256Bytes(profileBytes) != profileContent.sha256)
+      failRun("IFQ_WSI_REFERENCE_MASK_PROFILE changed while it was being read")
+    profileText = StandardCharsets.UTF_8.newDecoder()
+      .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+      .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+      .decode(java.nio.ByteBuffer.wrap(profileBytes)).toString()
+    if (profileText.startsWith("\uFEFF")) profileText = profileText.substring(1)
+    root = (Map) GsonTools.getInstance().fromJson(profileText, Map.class)
   } catch (Exception e) {
     failRun("Cannot parse IFQ_WSI_REFERENCE_MASK_PROFILE as JSON: " + profileFile.absolutePath, e)
     return null
@@ -869,7 +942,7 @@ logMsg("reference space   : " + (referenceMaskProfile == null ?
 logMsg("compression       : " + COMPRESSION + " (lossless)   panel=" + PANEL + "   roiName=" + ROI_NAME)
 logMsg("output            : " + outRoot.getAbsolutePath())
 
-def runRecord = [ schema_version: "1.2", stage: "wsi_tile_export",
+def runRecord = [ schema_version: "1.3", stage: "wsi_tile_export",
                   generated_utc : java.time.Instant.now().toString(),
                   stage1_script: stage1ScriptRecord,
                   qupath_series_selection: [
@@ -1063,12 +1136,38 @@ slides.each { slideFile ->
               slideFile.name + ": declared " + declared.mask_width + "x" + declared.mask_height +
               " @ " + declared.downsample + ", actual " + mw + "x" + mh + " @ " + TISSUE_DS)
 
-    def sourceTissue = loadStrictBinaryMask(declared.tissue_mask._file, mw, mh,
-                                            "external tissue mask for " + slideFile.name)
-    def sourceAirway = loadStrictBinaryMask(declared.airway_mask._file, mw, mh,
-                                            "external airway mask for " + slideFile.name)
+    File sourceTissueCopy = new File(referenceDir, "source_tissue_mask.bin")
+    File sourceAirwayCopy = new File(referenceDir, "source_airway_mask.bin")
+    def sourceTissueContent = publishFileAtomically(
+        declared.tissue_mask._file, sourceTissueCopy, "external tissue mask")
+    def sourceAirwayContent = publishFileAtomically(
+        declared.airway_mask._file, sourceAirwayCopy, "external airway mask")
+    if (sourceTissueContent.sha256 != declared.tissue_mask.sha256 ||
+        sourceTissueContent.size_bytes != declared.tissue_mask.size_bytes ||
+        sourceAirwayContent.sha256 != declared.airway_mask.sha256 ||
+        sourceAirwayContent.size_bytes != declared.airway_mask.size_bytes)
+      failRun("Reference masks changed between profile validation and Stage 1 publication")
+
+    // Decode the exact hash-verified copies that will be retained as evidence,
+    // never a second unbound read from the external source paths.
+    def sourceTissue = loadStrictBinaryMask(sourceTissueCopy, mw, mh,
+                                            "published external tissue mask for " + slideFile.name)
+    def sourceAirway = loadStrictBinaryMask(sourceAirwayCopy, mw, mh,
+                                            "published external airway mask for " + slideFile.name)
     byte[] tissuePixels = (byte[]) sourceTissue.getPixels()
     byte[] airwayPixels = (byte[]) sourceAirway.getPixels()
+    File sourceTissuePixelsFile = new File(referenceDir, "source_tissue_mask_pixels.uint8")
+    File sourceAirwayPixelsFile = new File(referenceDir, "source_airway_mask_pixels.uint8")
+    def sourceTissuePixelsRecord = publishCanonicalMaskPixels(
+        tissuePixels, mw, mh, sourceTissuePixelsFile, "canonical source tissue-mask pixels")
+    def sourceAirwayPixelsRecord = publishCanonicalMaskPixels(
+        airwayPixels, mw, mh, sourceAirwayPixelsFile, "canonical source airway-mask pixels")
+    referenceArtifactsToVerify.addAll([
+      [file: sourceTissuePixelsFile, content: sourceTissuePixelsRecord.content,
+       label: "canonical source tissue-mask pixels"],
+      [file: sourceAirwayPixelsFile, content: sourceAirwayPixelsRecord.content,
+       label: "canonical source airway-mask pixels"]
+    ])
     byte[] finalPixels = new byte[tissuePixels.length]
     for (int i = 0; i < tissuePixels.length; i++) {
       boolean inTissue = (tissuePixels[i] & 0xFF) == 255
@@ -1082,17 +1181,6 @@ slides.each { slideFile ->
     }
     bp = new ByteProcessor(mw, mh, finalPixels, null)
 
-    File sourceTissueCopy = new File(referenceDir, "source_tissue_mask.bin")
-    File sourceAirwayCopy = new File(referenceDir, "source_airway_mask.bin")
-    def sourceTissueContent = publishFileAtomically(
-        declared.tissue_mask._file, sourceTissueCopy, "external tissue mask")
-    def sourceAirwayContent = publishFileAtomically(
-        declared.airway_mask._file, sourceAirwayCopy, "external airway mask")
-    if (sourceTissueContent.sha256 != declared.tissue_mask.sha256 ||
-        sourceTissueContent.size_bytes != declared.tissue_mask.size_bytes ||
-        sourceAirwayContent.sha256 != declared.airway_mask.sha256 ||
-        sourceAirwayContent.size_bytes != declared.airway_mask.size_bytes)
-      failRun("Reference masks changed between profile validation and Stage 1 publication")
     File finalMaskFile = new File(referenceDir, "analysis_tissue_minus_airway_mask.tif")
     def finalMaskContent = publishBinaryMaskTiff(
         bp, finalMaskFile, "analysis tissue-minus-airway mask")
@@ -1125,10 +1213,19 @@ slides.each { slideFile ->
         published_relative_path: "reference_space/" + sourceAirwayCopy.name,
         content: sourceAirwayContent
       ],
+      source_tissue_mask_pixels: sourceTissuePixelsRecord,
+      source_airway_mask_pixels: sourceAirwayPixelsRecord,
       tissue_mask: [published_relative_path: "reference_space/" + finalMaskFile.name,
                     content: finalMaskContent]
     ]
   }
+  File analysisPixelsFile = new File(referenceDir, "analysis_tissue_mask_pixels.uint8")
+  def analysisPixelsRecord = publishCanonicalMaskPixels(
+      ((byte[]) bp.getPixels()).clone(), mw, mh, analysisPixelsFile,
+      "canonical analysis tissue-mask pixels")
+  referenceArtifactsToVerify << [file: analysisPixelsFile,
+      content: analysisPixelsRecord.content, label: "canonical analysis tissue-mask pixels"]
+  referenceSpaceRecord.analysis_tissue_mask_pixels = analysisPixelsRecord
   long fgPx = Px.countForeground(bp)
   if (fgPx <= 0)
     failRun("The declared tissue reference space contains no analyzable foreground in " +

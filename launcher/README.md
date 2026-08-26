@@ -28,7 +28,7 @@ refuses to start a run it cannot describe.
 |---|---|---|---|
 | 1 | **IF — confocal / field images** | Fiji only | `run_summary.csv` (+ `.xlsx`, `run_manifest.json`), one row per (image, region) |
 | 2 | **IF — slide scanner (`.vsi` whole slide)** | QuPath → Fiji → Python | tiles → per-tile measurements → slide, mouse, and group CSV summaries |
-| 3 | **H&E / brightfield** | — | **not available in this build** |
+| 3 | **H&E / brightfield** | packaged Python review tools only | **biological execution disabled; separate engineering/review screen** |
 | 4 | **Fiji-only legacy mode** | Fiji only | byte-for-byte the v1.7.2 environment and command line |
 
 **Route 2 is the important architectural point.** QuPath reads and tiles the
@@ -133,13 +133,49 @@ modern route for content-bound StarDist. These controls establish runtime
 provenance, not model accuracy, segmentation performance or scientific suitability. See
 `docs/STARDIST_RUNTIME.md` for the manifest contract and preparation workflow.
 
-### Route 3 is visible and deliberately unselectable
+### Route 3 biological execution is disabled; review tools are isolated
 
-It appears in the list, greyed, with a written reason. That is a design choice,
-not an oversight. Hiding it would invite someone to point route 1 at an H&E
-slide, and **that would not fail** — the fluorescence engine assumes signal is
-bright on a dark background, which is inverted for H&E. It would produce a
-complete, plausible, wrong `run_summary.csv`.
+Route 3 appears in the list, greyed, with a written reason. A separate **Open
+H&E engineering/review tools** button is available beneath it. The button does
+not select Route 3 and does not enter the fluorescence runner: its closed
+command surface contains only the packaged `he_pipeline.py status`,
+`build-review`, and `aggregate-review` commands. It never starts Fiji or
+QuPath, and it cannot run the unvalidated H5/H6 nuclei, lesion, compartment, or
+topology analysis.
+
+The executable content-addresses and holds the exact H&E script, locked study,
+review rubric, stain profile, measurement-record schema, and required
+`ifquant` modules. Every operation first probes the selected executable through
+the same contained `-I -B -S` process path, requires CPython 3.10 or newer,
+reconciles `sys.executable` to the selected regular `python*.exe`, and records
+its normalized path, version, and SHA-256 in the launcher receipt. The
+aggregation audit and each schema-v2 record bind that same interpreter hash.
+
+Before any review output is published, the launcher validates and read-locks
+the declared source/R1/H4 trees, revalidates their membership after the child
+exits, and validates every declared byte/hash. For an aggregate it additionally
+parses the exact three CSV contracts and all 48 JSONL records, reconciles the
+eight sections, four mice, six endpoints, every published locked review field
+back to the selected blinded CSV, deterministic schema-v2 record IDs, the
+measurement profile, provenance closure, and exact non-composite descriptors.
+Publication uses a unique sibling
+staging directory and a cancellation/publication state lock. The staging
+validation lease denies write, delete, rename, and replacement of every
+validated package file, and is disposed before the Windows directory rename; the launcher
+then immediately reopens and fully revalidates the final path and held inputs
+before marking it committed. Cancellation wins before the rename, or the
+receipt explicitly reports either a committed result or an existing but
+unauthorized final path if post-move validation fails. Existing output is never
+resumed or overwritten.
+Aggregation remains descriptive only: technical sections are not biological
+replicates, no scalar ordinal composite is emitted, and group inference remains
+unavailable.
+
+Keeping biological execution greyed is intentional. Hiding it would invite
+someone to point route 1 at an H&E slide, and **that would not fail** — the
+fluorescence engine assumes bright signal on a dark background, which is
+inverted for H&E. It would produce a complete, plausible, wrong
+`run_summary.csv`.
 
 Re-enabling is one line:
 
@@ -150,9 +186,10 @@ public static readonly bool BrightfieldRouteEnabled = false;   // this build
 
 It is `static readonly`, not `const`, so the branches are *not* folded away at
 compile time and the disabled paths stay reachable and testable. Flipping it
-makes the route selectable but does not conjure an engine: `BuildStage2` still
-refuses with a named cause, so a half-finished re-enable fails at the Run
-button instead of producing an empty run.
+makes the biological route selectable but does not conjure an engine:
+`BuildStage2` still refuses with a named cause, so a half-finished re-enable
+fails at the Run button instead of producing an empty run. It is not required
+for, and does not widen, the isolated review-only screen.
 
 An unknown route id fails closed on every axis — no tools assumed present, an
 omitted threshold treated as a hard stop, nothing written.
@@ -161,7 +198,7 @@ omitted threshold treated as a hard stop, nothing written.
 
 Route 4 exists so that analyses run before v1.8.0 stay reproducible. It is
 checked by a harness that *executes* both versions rather than asserting about
-them — `launcher/legacy_equivalence_report.txt`, **84 checks, 0 failures**:
+them — `launcher/legacy_equivalence_report.txt`, **85 checks, 0 failures**:
 
 - **Environment**: 7 fixture cases (defaults, all-non-default, each conditional
   key, both at once, an Advanced overlay that shadows a base key, and values
@@ -202,7 +239,7 @@ From the repository root:
 powershell -ExecutionPolicy Bypass -File .\launcher\build.ps1
 ```
 
-Three source files are compiled into one self-contained `AnyCPU` executable
+Four source files are compiled into one self-contained `AnyCPU` executable
 with no external dependencies; the same file supports Windows ARM64 and x64 and
 needs no .NET SDK on the analysis system. The build **runs** `--self-test` and
 a UI smoke test, and discards the binary on failure. (v1.7.2 shipped a
@@ -229,7 +266,8 @@ closed instead of producing a plausible but uncalibrated bar.
 - for StarDist: an exported `.zip` model plus a closed runtime manifest for the
   exact StarDist, CSBDeep and TensorFlow artifacts loaded by that Fiji
 - QuPath 0.7+ console executable for route 2 only
-- Python 3.10+ for route 2 index validation and Stages 3-4
+- CPython 3.10+ for route 2 index validation and Stages 3-4, and for the
+  isolated Route 3 engineering/review screen
 - Windows PowerShell 5.1 for route 2's authoritative sharded orchestrator
 - Fiji's bundled `java.exe` and `ij1-patcher-*.jar`; route 2 forces this path
 - Route 2 `tiles` and slide output on the same hard-link-capable Windows volume

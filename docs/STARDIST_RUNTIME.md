@@ -105,6 +105,14 @@ The published TIFF is rehashed before the params record is written. The
 canonical pixel digest distinguishes computational output from TIFF container
 metadata.
 
+For WSI sharded runs, Stage 2 independently re-hashes the model, runtime
+manifest, every runtime artifact, and every label TIFF. It removes workstation
+paths from the published segmentation profile, requires one identical
+model/runtime/configuration profile across all shards, ties label dimensions to
+the Stage 1 export window, and requires label evidence to cover the run-summary
+`output_key`/region identities exactly. The segmentation-profile digest is part
+of `measurement_profile_sha256`.
+
 Label output is accepted only when every pixel is a finite integer in the
 unsigned-16 range. A label above 65,535 fails before pixel hashing or TIFF
 publication instead of being truncated into a different instance identifier.

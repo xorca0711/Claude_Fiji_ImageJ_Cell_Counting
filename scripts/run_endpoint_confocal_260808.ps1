@@ -1,6 +1,6 @@
 param(
   [string]$RunRoot = "D:\IFQ_Runs\confocal_260808",
-  [string]$DataRoot = "D:\Confocal_Images\260808-CW\260808-CW",
+  [string]$DataRoot = "D:\Microscopy_Images\260808-CW_Confocal\260808-CW",
   [switch]$AllowUncalibratedExploratory
 )
 
@@ -12,7 +12,7 @@ param(
 #   2. evaluate_endpoints.groovy runs with IFQ_ENDPOINT_REGION_MODE=tissue_mask,
 #      which clips the mask algebra to those regions.
 #
-# Nothing is written to D:\Confocal_Images (read only) or to <run>\analysis
+# Nothing is written to D:\Microscopy_Images (read only) or to <run>\analysis
 # (the measured result). Masks land in <run>\tissue_masks.
 
 $ErrorActionPreference = "Stop"

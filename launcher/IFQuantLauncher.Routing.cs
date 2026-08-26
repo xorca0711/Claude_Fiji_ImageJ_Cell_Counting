@@ -2555,8 +2555,22 @@ namespace IFQuantLauncher.Routing
         }
 
         /// <summary>
+        /// Prepare an engineering/review child without creating another route
+        /// into the analysis environment.  The isolated H&amp;E tools receive no
+        /// inherited IFQ_* values and no RunSeal because they cannot launch an
+        /// IFQ analysis stage.
+        /// </summary>
+        public static void PrepareNonAnalysis(
+            System.Diagnostics.ProcessStartInfo psi)
+        {
+            if (psi == null) throw new ArgumentNullException("psi");
+            NormalizeDuplicateKeyCasing();
+            ClearIfq(psi.EnvironmentVariables);
+        }
+
+        /// <summary>
         /// The ONE statement in this program that writes a variable into a child
-        /// process's environment. build.ps1 scans the three shipping sources and
+        /// process's environment. build.ps1 scans the complete shipping source set and
         /// discards the binary if a second one appears, because a second one is
         /// exactly how rounds 1 and 2 happened.
         /// </summary>

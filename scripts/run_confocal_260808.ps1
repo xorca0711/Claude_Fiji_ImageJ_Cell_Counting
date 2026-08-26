@@ -1,7 +1,7 @@
 param(
   [string]$OutputRoot = "D:\IFQ_Runs\confocal_260808",
-  [string]$DataRoot = "D:\Confocal_Images\260808-CW\260808-CW",
-  [string]$PanelMapPath = "D:\IFQ_Runs\confocal_260808\panel_map.csv"
+  [string]$DataRoot = "D:\Microscopy_Images\260808-CW_Confocal\260808-CW",
+  [string]$PanelMapPath = "D:\IFQ_Runs\confocal_visual_panels_Retouch_80\panel_map.csv"
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +71,41 @@ $ErrorActionPreference = "Continue"
   --run "$repo\IF_Quant_Pipeline.groovy" 2>&1 |
   Out-File "$out\engine.log" -Encoding utf8
 
-$engineExit = $LASTEXITCODE
-"exit=$engineExit"
-exit $engineExit
+$javaExit = $LASTEXITCODE
+$manifestPath = Join-Path $out "analysis\run_manifest.json"
+$manifestStatus = "absent"
+$publicationStatus = "absent"
+$manifestAccepted = $false
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+  try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 |
+                ConvertFrom-Json -ErrorAction Stop
+    $manifestStatus = [string]$manifest.status
+    $publicationStatus = [string]$manifest.publication_status
+    $manifestAccepted =
+      $manifestStatus -eq "complete" -and
+      $publicationStatus -eq "sealed_complete"
+  } catch {
+    $manifestStatus = "unparseable"
+    $publicationStatus = "unparseable"
+    [Console]::Error.WriteLine(
+      "Run manifest is unreadable after Fiji returned: " + $_.Exception.Message)
+  }
+}
+
+$finalExit = $javaExit
+if ($finalExit -eq 0 -and -not $manifestAccepted) {
+  # SciJava can log a script exception yet return zero from the Java process.
+  # Only the engine's audit-last, sealed-complete manifest can authorize a
+  # successful wrapper exit. Incomplete/partial manifests stay available for
+  # QC, but the caller receives a failure status.
+  $finalExit = 1
+  [Console]::Error.WriteLine(
+    "Fiji returned zero without a sealed-complete run manifest; " +
+    "status=$manifestStatus publication_status=$publicationStatus")
+}
+"java_exit=$javaExit"
+"manifest_status=$manifestStatus"
+"publication_status=$publicationStatus"
+"exit=$finalExit"
+exit $finalExit

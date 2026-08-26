@@ -173,7 +173,7 @@ def atomicWriteBytes(File target, byte[] payload) {
     try {
       output.write(payload)
       output.flush()
-      output.fd.sync()
+      output.getFD().sync()
     } finally {
       output.close()
     }
@@ -4423,7 +4423,7 @@ if (!ALLOW_NONEMPTY_OUTPUT && existingOutputEntries.length > 0) {
 // the canonical name while new artifacts are being produced. Preserve it as a
 // recoverable stale record before the first analytical write.
 def priorRunManifest = new File(outputRoot, "run_manifest.json")
-if (priorRunManifest.isFile()) {
+if (!DISPLAY_PREVIEW_ONLY && priorRunManifest.isFile()) {
   try {
     def priorContent = contentSnapshot(priorRunManifest, "previous run manifest")
     def staleManifest = new File(

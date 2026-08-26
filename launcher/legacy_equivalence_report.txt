@@ -26,11 +26,11 @@ Route 4 legacy (v1.7.2) equivalence -- executed, not asserted
   PASS  v1.7.2's Fiji command line is the one LegacyProfile.CommandLine reproduces
   PASS  v1.7.2 contains no QuPath / .vsi / IFQ_WSI_ / brightfield reference
 
-[c] The v1.8.0 source cannot quietly stop being legacy
-  PASS  the current source declares AssemblyFileVersion 1.9.0.0
+[c] The current post-v1.7.2 source cannot quietly stop being legacy
+  PASS  the current source declares AssemblyFileVersion 1.9.7.0
   PASS  route 4 is built by LegacyProfile.BuildEnvironment
   PASS  route 4 uses LegacyProfile.CommandLine
-  PASS  the v1.8.0 launcher assigns IFQ_MIN_INCLUDED_NUCLEI nowhere (only RunEnvironment.BuildStage2 does, and route 4 does not go through it)
+  PASS  the current launcher assigns IFQ_MIN_INCLUDED_NUCLEI nowhere (only RunEnvironment.BuildStage2 does, and route 4 does not go through it)
   PASS  the launcher applies the environment through the code this harness runs
   PASS  the launcher applies a RunSeal, not a raw environment dictionary
   PASS  ...and the pre-choke-point call that took the dictionary is gone
@@ -41,7 +41,8 @@ Route 4 legacy (v1.7.2) equivalence -- executed, not asserted
   PASS  no check in the launcher fails merely because the brightfield flag is on
   PASS  BrightfieldRouteEnabled is a static readonly field, not a const
   PASS  ...and is not declared const anywhere
-  PASS  the user-visible reason still makes the one-line claim it now honours
+  PASS  the user-visible reason states that the brightfield flag alone is insufficient
+  PASS  the user-visible reason no longer claims brightfield is a one-line enable
 
 [d] Process-level diff: what the child process actually receives
   PASS  case 1 recommended defaults, panel LEFT: child process environment identical
@@ -100,7 +101,7 @@ Route 4 legacy (v1.7.2) equivalence -- executed, not asserted
   PASS  and the nuclei floor the operator typed is one of them
 
 [e] Embedded analysis artefacts
-      pipeline b45e4289d8b7ea0cb6f1cd3185e5aa56c28c7e5ae7cb70d530629b28c32d4e74
+      pipeline 8085eedcd0a6c3095ae6ed88201e7f8d0092b5bad7705e7e858da2d9b11e157b
       registry 20c6859d8b7d1114b5476eefc90d8c92affa78d9a59d1be11d2449ba98460b37
   PASS  embedded artefacts DIFFER from v1.7.2's and the drift is DETECTED
   PASS  the drift note names the actual embedded pipeline hash
@@ -109,4 +110,4 @@ Route 4 legacy (v1.7.2) equivalence -- executed, not asserted
       Route 4 reproduces the v1.7.2 ENVIRONMENT and COMMAND LINE
       exactly; the engine carries subsequent fixes.
 
-checks: 84   failures: 0
+checks: 85   failures: 0

@@ -3,7 +3,7 @@
 
     Diff against the v1.7.2 build script, in full:
 
-      1. THREE source files are compiled instead of one. csc takes a list, so
+      1. FOUR source files are compiled instead of one. csc takes a list, so
          nothing about the shape of the build changes; the launcher is still a
          single self-contained .exe with no external dependencies.
       2. The complete Route 2 runtime tree is embedded: QuPath Stage 1, the
@@ -33,7 +33,8 @@ $repo = Split-Path -Parent $PSScriptRoot
 $sources = @(
     (Join-Path $PSScriptRoot "IFQuantLauncher.cs"),
     (Join-Path $PSScriptRoot "IFQuantLauncher.Routing.cs"),
-    (Join-Path $PSScriptRoot "MainForm.Routes.partial.cs")
+    (Join-Path $PSScriptRoot "MainForm.Routes.partial.cs"),
+    (Join-Path $PSScriptRoot "HeReviewForm.cs")
 )
 $manifest = Join-Path $PSScriptRoot "app.manifest"
 
@@ -74,6 +75,20 @@ $resources = [ordered]@{
     "stardist_runtime_schema" = @{
         Path = (Join-Path $repo "schemas\stardist-runtime-manifest.schema.json")
         Id   = "IFQuant.stardist-runtime-manifest.schema.json"
+    }
+    "he_pipeline" = @{ Path = (Join-Path $repo "scripts\he_pipeline.py")
+                       Id   = "IFQuant.he_pipeline.py" }
+    "he_study" = @{
+        Path = (Join-Path $repo "config\studies\g_surf_he_20260812.json")
+        Id   = "IFQuant.g_surf_he_20260812.json"
+    }
+    "he_rubric" = @{
+        Path = (Join-Path $repo "config\brightfield\he_pathology_review_rubric.json")
+        Id   = "IFQuant.he_pathology_review_rubric.json"
+    }
+    "he_stain_profile" = @{
+        Path = (Join-Path $repo "config\brightfield\he_stain_profiles\g_surf_he_20260812_reviewed_locked_v1.json")
+        Id   = "IFQuant.g_surf_he_20260812_reviewed_locked_v1.json"
     }
 }
 

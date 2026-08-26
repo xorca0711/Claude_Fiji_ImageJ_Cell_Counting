@@ -72,7 +72,8 @@ $harness = Join-Path $work "LegacyEquivalence.exe"
     (Join-Path $PSScriptRoot "LegacyEquivalence.cs") `
     (Join-Path $PSScriptRoot "IFQuantLauncher.cs") `
     (Join-Path $PSScriptRoot "IFQuantLauncher.Routing.cs") `
-    (Join-Path $PSScriptRoot "MainForm.Routes.partial.cs") | Out-Null
+    (Join-Path $PSScriptRoot "MainForm.Routes.partial.cs") `
+    (Join-Path $PSScriptRoot "HeReviewForm.cs") | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Harness build failed." }
 
 & $harness `

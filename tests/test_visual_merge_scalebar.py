@@ -65,6 +65,10 @@ def test_launcher_route2_is_manifest_discovered_indexed_and_self_contained():
         "measurement-record.schema.json",
         "wsi-reference-mask-profile.schema.json",
         "stardist-runtime-manifest.schema.json",
+        "scripts\\he_pipeline.py",
+        "g_surf_he_20260812.json",
+        "he_pathology_review_rubric.json",
+        "g_surf_he_20260812_reviewed_locked_v1.json",
     ):
         assert required in build
 
@@ -206,3 +210,112 @@ def test_launcher_seals_reference_masks_and_stardist_content_authorities():
     assert "Content provenance does not establish segmentation performance" in routes
     assert "automatic DAPI/Otsu engineering mask" in docs
     assert "model accuracy, segmentation performance" in docs
+
+
+def test_launcher_exposes_only_isolated_he_engineering_review_tools():
+    launcher = (ROOT / "launcher" / "IFQuantLauncher.cs").read_text(encoding="utf-8")
+    routing = (ROOT / "launcher" / "IFQuantLauncher.Routing.cs").read_text(
+        encoding="utf-8"
+    )
+    routes = (ROOT / "launcher" / "MainForm.Routes.partial.cs").read_text(
+        encoding="utf-8"
+    )
+    review = (ROOT / "launcher" / "HeReviewForm.cs").read_text(encoding="utf-8")
+    build = (ROOT / "launcher" / "build.ps1").read_text(encoding="utf-8")
+    legacy_runner = (ROOT / "launcher" / "run_legacy_equivalence.ps1").read_text(
+        encoding="utf-8"
+    )
+    launcher_docs = (ROOT / "launcher" / "README.md").read_text(encoding="utf-8")
+    root_docs = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "public static readonly bool BrightfieldRouteEnabled = false;" in routing
+    assert "HeReviewForm.cs" in build
+    assert "HeReviewForm.cs" in legacy_runner
+    assert "heReviewToolsButton" in routes
+    assert "Open H&E engineering/review tools (no biological analysis)" in routes
+    assert "using (HeReviewForm review" in routes
+    assert "BuildStage2" not in review
+    assert "RunEnvironment" not in review
+
+    for command in ("status", "build-review", "aggregate-review"):
+        assert f'"{command}"' in review
+    assert '"-I", "-B", "-S"' in review
+    assert "EnvironmentApply.PrepareNonAnalysis(info);" in review
+    assert "ClearIfq(psi.EnvironmentVariables);" in routing
+    assert "ContainedStageLaunch.Prepare(info)" in review
+    assert "ProcessJob.CreateArmed()" in review
+
+    for resource in (
+        "IFQuant.he_pipeline.py",
+        "IFQuant.g_surf_he_20260812.json",
+        "IFQuant.he_pathology_review_rubric.json",
+        "IFQuant.g_surf_he_20260812_reviewed_locked_v1.json",
+    ):
+        assert resource in launcher
+        assert resource in build
+    assert "paths.MeasurementSchemaPath" in launcher
+    assert "ifquant\", \"adapters.py" in review
+    assert "ifquant\", \"contracts.py" in review
+    assert "ifquant\", \"route_records.py" in review
+    assert "ifquant\", \"stage2_index.py" in review
+
+    assert ".ifquant-he-staging-" in review
+    assert "NormalizeFreshOutput" in review
+    assert "Directory.Move(staging, final);" in review
+    assert "ValidateReviewPackage(staging, runtime)" in review
+    assert "ValidateAggregatePackage(" in review
+    assert "staging, runtime, reviewCsv" in review
+    assert "PACKAGE_MANIFEST.json" in review
+    assert "he_review_aggregation.audit.json" in review
+    assert "FileShare.Read | FileShare.Delete" not in review
+    assert "H&E leased package file allowed rename or delete" in review
+    assert "File.Move(leasedArtifact, renamedArtifact)" in review
+    assert "File.Delete(leasedArtifact)" in review
+    assert "inputs.VerifyUnchanged();" in review
+    assert "package.VerifyUnchanged();" in review
+    assert "technical_sections_are_biological_replicates" in review
+    assert "group_inference_supported" in review
+    assert "Require(!(value is bool)" in review
+    assert "CanonicalJsonSha256(audit, \"audit_payload_sha256\")" in review
+    assert "H&E integer parser accepted a JSON boolean as a number" in review
+    assert "inputArtifacts.Length == 12" in review
+    assert 'string inputRole = StringAt(item, "role")' in review
+    assert "Require(inputRoles.Add(inputRole)" in review
+    assert "ExpectedAggregateRole(relative)" in review
+    assert 'StringAt(records, "schema_sha256")' in review
+    assert 'inputHashes["aggregation_code"]' in review
+    assert 'inputHashes["blinded_review_csv"] == Sha256File(reviewCsv)' in review
+    assert 'inputHashes["python_interpreter"]' in review
+    assert "values.Length == 13" in review
+    assert "ValidateSectionScores(" in review
+    assert "ValidateAuthoritativeReview(reviewCsv" in review
+    assert "RequireLockedReviewFieldsMatch(" in review
+    assert "ValidateMouseSummaries(" in review
+    assert "ValidateTechnicalAgreement(" in review
+    assert "ValidateMeasurementRecords(" in review
+    assert "ExpectedMeasurementRecordId(" in review
+    assert 'return "ifqmr-" + CanonicalJsonValueSha256(measurementIdentity)' in review
+    assert "expectedSections.Count *" in review
+    assert "OrdinalEndpoints.Length" in review
+    assert "StringArrayEquals(" in review
+    assert "CanonicalJsonValueSha256(LockedReviewFields)" in review
+    assert "PythonProbeArguments()" in review
+    assert 'implementation == "CPython"' in review
+    assert "major == 3 && minor >= 10" in review
+    assert "reportedPath, selectedPath" in review
+    assert "pythonIdentity.Receipt" in review
+    assert "operationPythonReceipt = identity.Receipt" in review
+    assert "ReceiptSuffix(pythonReceipt)" in review
+    assert "lock (publicationSync)" in review
+    assert "finalOutputMoved = true" in review
+    assert "finalOutputCommitted = true" in review
+    assert "FINAL PATH EXISTS BUT IS NOT AUTHORIZED" in review
+    assert "Action validatePublished" in review
+    assert "ValidateReviewPackage(\n                                           final, runtime)" in review
+    assert "ValidateAggregatePackage(\n                                           final, runtime" in review
+    assert review.count("Directory.Move(staging, final);") == 1
+    assert review.count("PublishStaging(") == 3
+    assert "Directory.Move(moveSource, moveFinal);" in review
+    assert "HePackageLease.Open(moveFinal)" in review
+    assert "biological execution disabled" in launcher_docs
+    assert "separate review-only launcher screen" in root_docs

@@ -968,7 +968,7 @@ def _validate_direct_output_artifacts(manifest, output_root):
         if (
             not isinstance(size_bytes, int)
             or isinstance(size_bytes, bool)
-            or size_bytes < 0
+            or size_bytes < 1
             or re.fullmatch(r"[0-9a-f]{64}", str(sha256)) is None
         ):
             raise DirectRunManifestError(f"{label} has invalid size/SHA-256")
@@ -1067,7 +1067,8 @@ def validate_direct_run_manifest(
         if manifest.get(field) is not True:
             raise DirectRunManifestError(f"direct run manifest {field} is not true")
     for field in ("failure_count", "output_failure_count", "max_images_excluded_count"):
-        if manifest.get(field) != 0:
+        value = manifest.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value != 0:
             raise DirectRunManifestError(
                 f"direct run manifest {field} must be zero for production records"
             )
@@ -1099,6 +1100,10 @@ def validate_direct_run_manifest(
     if set(by_role) != {"run_summary", "summary_workbook", "image_params"}:
         raise DirectRunManifestError("direct run output artifact roles are incomplete")
     summary_artifact = by_role["run_summary"][0]
+    if summary_artifact["relative_path"] != "run_summary.csv":
+        raise DirectRunManifestError(
+            "direct run summary artifact must be canonical run_summary.csv"
+        )
     try:
         same_summary = summary_artifact["path"].samefile(summary_path)
     except OSError as exc:
@@ -1121,6 +1126,13 @@ def validate_direct_run_manifest(
     }:
         raise DirectRunManifestError("run_summary_content disagrees with output_artifacts")
     workbook = by_role["summary_workbook"][0]
+    if (
+        workbook["relative_path"] != "run_summary.xlsx"
+        or manifest.get("summary_workbook") != "run_summary.xlsx"
+    ):
+        raise DirectRunManifestError(
+            "direct run workbook artifact must be canonical run_summary.xlsx"
+        )
     workbook_content = _content_identity(
         manifest.get("summary_workbook_content"),
         "direct run summary_workbook_content",
@@ -1148,7 +1160,12 @@ def validate_direct_run_manifest(
         raise DirectRunManifestError(
             "direct run image status/count ledger is inconsistent or contains failures"
         )
-    if manifest.get("skipped_count") != len(skips):
+    skipped_count = manifest.get("skipped_count")
+    if (
+        not isinstance(skipped_count, int)
+        or isinstance(skipped_count, bool)
+        or skipped_count != len(skips)
+    ):
         raise DirectRunManifestError("direct run skipped_count disagrees with images")
     allowed_skip_reasons = {
         "non_analytical_map_acquisition",
@@ -1183,7 +1200,11 @@ def validate_direct_run_manifest(
     success_by_key = {}
     for image in successes:
         output_key = image.get("output_key")
-        if not isinstance(output_key, str) or not output_key or output_key in success_by_key:
+        if (
+            not isinstance(output_key, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]+", output_key) is None
+            or output_key in success_by_key
+        ):
             raise DirectRunManifestError(
                 "successful image output_key values must be unique and non-empty"
             )
@@ -1221,8 +1242,14 @@ def validate_direct_run_manifest(
         manifest.get("engine_script"), "direct run engine_script"
     )
     engine_path = manifest.get("engine_script_path")
-    if not isinstance(engine_path, str) or not engine_path.strip():
-        raise DirectRunManifestError("direct run engine_script_path is missing")
+    if (
+        not isinstance(engine_path, str)
+        or not engine_path.strip()
+        or not Path(engine_path).is_absolute()
+    ):
+        raise DirectRunManifestError(
+            "direct run engine_script_path must be absolute"
+        )
     engine_digest, engine_size = _require_current_content(
         engine_path, engine_content, "direct run engine script"
     )
@@ -1267,13 +1294,49 @@ def validate_direct_run_manifest(
     authority = config.get("stardistAuthority")
     if not isinstance(authority, dict):
         raise DirectRunManifestError("direct run stardistAuthority must be an object")
+    common_authority_fields = {
+        "active",
+        "authority",
+        "api_command",
+        "model_choice",
+        "model_content",
+        "model_archive",
+        "runtime_manifest_content",
+        "runtime_profile_id",
+        "runtime_artifacts",
+        "class_bindings",
+    }
+    expected_authority_fields = set(common_authority_fields)
+    if segmenter == "stardist":
+        expected_authority_fields.update({"model_path", "runtime_manifest_path"})
+    if set(authority) != expected_authority_fields:
+        raise DirectRunManifestError(
+            "direct run StarDist authority fields do not match the engine contract"
+        )
     runtime_profile_id = authority.get("runtime_profile_id")
     model_sha256 = None
 
     for index, output_key in enumerate(sorted(success_by_key), start=1):
         image = success_by_key[output_key]
         params_artifact = params_artifacts[output_key]
-        if image.get("params_relative_path", "").replace("\\", "/") != params_artifact["relative_path"]:
+        channel_signature = image.get("channel_signature")
+        image_file = image.get("file")
+        if (
+            not isinstance(channel_signature, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]+", channel_signature) is None
+            or not isinstance(image_file, str)
+            or not image_file
+            or Path(image_file).name != image_file
+        ):
+            raise DirectRunManifestError(
+                f"successful image {output_key!r} has unsafe file/channel identity"
+            )
+        expected_params_relative = f"{output_key}/{channel_signature}__params.json"
+        if (
+            image.get("params_relative_path", "").replace("\\", "/")
+            != params_artifact["relative_path"]
+            or params_artifact["relative_path"] != expected_params_relative
+        ):
             raise DirectRunManifestError(
                 f"successful image {output_key!r} params path disagrees with output_artifacts"
             )
@@ -1327,6 +1390,10 @@ def validate_direct_run_manifest(
             image.get("source_content"),
             f"successful image {output_key!r} source_content",
         )
+        if raw_identity["name"] != image.get("file"):
+            raise DirectRunManifestError(
+                f"successful image {output_key!r} raw filename disagrees with image identity"
+            )
         raw_digest, raw_size = _require_current_content(
             raw_path, raw_identity, f"successful image {output_key!r} current raw source"
         )
@@ -1368,6 +1435,10 @@ def validate_direct_run_manifest(
             raise DirectRunManifestError(
                 f"successful image {output_key!r} stardist_runtime must be an object"
             )
+        if set(params_runtime) != common_authority_fields | {"label_outputs"}:
+            raise DirectRunManifestError(
+                f"successful image {output_key!r} stardist_runtime fields are not exact"
+            )
         for field in (
             "active",
             "authority",
@@ -1392,6 +1463,10 @@ def validate_direct_run_manifest(
             raise DirectRunManifestError(
                 f"successful image {output_key!r} model authority disagrees with run config"
             )
+        if params.get("stardist_model_choice") != config.get("stardistModelChoice"):
+            raise DirectRunManifestError(
+                f"successful image {output_key!r} model choice disagrees with run config"
+            )
 
     if any(len(signatures) != 1 for signatures in panel_signatures.values()):
         raise DirectRunManifestError(
@@ -1402,8 +1477,17 @@ def validate_direct_run_manifest(
         if (
             authority.get("active") is not False
             or authority.get("authority") != "not_applicable_classic"
+            or authority.get("api_command") is not None
+            or authority.get("model_choice") is not None
+            or authority.get("model_content") is not None
+            or authority.get("model_archive") is not None
+            or authority.get("runtime_manifest_content") is not None
+            or authority.get("runtime_profile_id") is not None
             or authority.get("runtime_artifacts") != []
+            or authority.get("class_bindings") != []
             or config.get("stardistModelSha256") is not None
+            or config.get("stardistModelChoice") is not None
+            or config.get("stardistModelAuthority") != "not_applicable_classic"
         ):
             raise DirectRunManifestError(
                 "classic run carries inconsistent StarDist model/runtime authority"
@@ -1411,6 +1495,13 @@ def validate_direct_run_manifest(
     else:
         if authority.get("active") is not True:
             raise DirectRunManifestError("StarDist run authority is not active")
+        if (
+            config.get("stardistModelChoice") != authority.get("model_choice")
+            or config.get("stardistModelAuthority") != authority.get("authority")
+        ):
+            raise DirectRunManifestError(
+                "StarDist model choice/authority disagrees with run config"
+            )
         if manifest.get("stardist_authority_verified_before_and_after") is not True or manifest.get("stardist_authority_verified_at_manifest_publication") is not True:
             raise DirectRunManifestError(
                 "StarDist model/runtime was not verified through manifest publication"
@@ -1419,6 +1510,10 @@ def validate_direct_run_manifest(
             authority.get("model_content"), "direct StarDist model_content"
         )
         model_path = authority.get("model_path")
+        if not isinstance(model_path, str) or not Path(model_path).is_absolute():
+            raise DirectRunManifestError(
+                "direct StarDist model path must be absolute"
+            )
         model_digest, model_size = _require_current_content(
             model_path, model_content, "direct StarDist model"
         )
@@ -1442,6 +1537,13 @@ def validate_direct_run_manifest(
             "direct StarDist runtime_manifest_content",
         )
         runtime_manifest_path = authority.get("runtime_manifest_path")
+        if (
+            not isinstance(runtime_manifest_path, str)
+            or not Path(runtime_manifest_path).is_absolute()
+        ):
+            raise DirectRunManifestError(
+                "direct StarDist runtime manifest path must be absolute"
+            )
         runtime_manifest_digest, runtime_manifest_size = _require_current_content(
             runtime_manifest_path,
             runtime_manifest_content,
@@ -1465,9 +1567,13 @@ def validate_direct_run_manifest(
             )
         seen_runtime_roles = set()
         for index, artifact in enumerate(runtime_artifacts, start=1):
-            if not isinstance(artifact, dict):
+            if (
+                not isinstance(artifact, dict)
+                or set(artifact)
+                != {"role", "path", "expected_classes", "content"}
+            ):
                 raise DirectRunManifestError(
-                    "direct StarDist runtime artifact must be an object"
+                    "direct StarDist runtime artifact fields are not exact"
                 )
             role = artifact.get("role")
             if (
@@ -1483,6 +1589,13 @@ def validate_direct_run_manifest(
                 artifact.get("content"), f"direct StarDist runtime artifact {role}"
             )
             artifact_path = artifact.get("path")
+            if (
+                not isinstance(artifact_path, str)
+                or not Path(artifact_path).is_absolute()
+            ):
+                raise DirectRunManifestError(
+                    f"direct StarDist runtime artifact {role} path must be absolute"
+                )
             artifact_digest, artifact_size = _require_current_content(
                 artifact_path, content, f"direct StarDist runtime artifact {role}"
             )
@@ -1495,6 +1608,16 @@ def validate_direct_run_manifest(
             )
             input_artifacts.append(descriptor)
             tracked.append((descriptor, os.path.abspath(artifact_path)))
+        required_runtime_roles = {
+            "stardist_plugin",
+            "csbdeep_plugin",
+            "tensorflow_java",
+            "tensorflow_native",
+        }
+        if not required_runtime_roles.issubset(seen_runtime_roles):
+            raise DirectRunManifestError(
+                "direct StarDist runtime artifact ledger lacks required roles"
+            )
 
     direct_authority = {
         "engine_sha256": engine_content["sha256"],
@@ -2687,7 +2810,7 @@ def main():
                 ],
                 pool_columns=KEY_COLS,
             )
-        except RouteMeasurementSpecError as exc:
+        except (RouteMeasurementSpecError, DirectRunManifestError) as exc:
             sys.exit(
                 "ERROR: measurement records are not safe to aggregate: " + str(exc)
             )

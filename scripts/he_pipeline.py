@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -146,6 +147,79 @@ AGGREGATION_AUDIT_FILENAME = "he_review_aggregation.audit.json"
 MEASUREMENT_RECORD_SCHEMA_PATH = (
     REPO_ROOT / "schemas" / "measurement-record.schema.json"
 )
+AGGREGATION_OUTPUT_ROLES_BY_FILENAME = {
+    SECTION_SCORES_FILENAME: "unblinded_section_scores",
+    MOUSE_SUMMARY_FILENAME: "paired_technical_section_mouse_summary",
+    TECHNICAL_AGREEMENT_FILENAME: "technical_section_exact_agreement",
+    MEASUREMENT_RECORDS_FILENAME: "schema_v2_measurement_records",
+}
+SECTION_SCORE_FIELDS = (
+    "study_id",
+    "mouse_id",
+    "genotype",
+    "condition",
+    "section_id",
+    "technical_section_order",
+    "source_package_sha256",
+    "section_evaluability",
+    *LOCKED_REVIEW_FIELDS,
+)
+MOUSE_SUMMARY_FIELDS = (
+    "study_id",
+    "mouse_id",
+    "genotype",
+    "condition",
+    "endpoint_id",
+    "scale_id",
+    "section_1_id",
+    "section_1_reviewability",
+    "section_1_value",
+    "section_2_id",
+    "section_2_reviewability",
+    "section_2_value",
+    "ordered_section_values_json",
+    "n_evaluable_sections",
+    "paired_evaluability",
+    "minimum_observed_rank",
+    "maximum_observed_rank",
+    "exact_agreement",
+)
+TECHNICAL_AGREEMENT_FIELDS = (
+    "study_id",
+    "endpoint_id",
+    "scale_id",
+    "n_mouse_pairs_declared",
+    "n_pairs_both_evaluable",
+    "n_pairs_not_both_evaluable",
+    "n_exact_agreement",
+    "exact_agreement_fraction",
+    "ordered_mouse_pairs_json",
+)
+AGGREGATION_CODE_PATHS_BY_ROLE = {
+    "aggregation_code": Path(__file__).resolve(),
+    "ifquant_package_init": REPO_ROOT / "ifquant" / "__init__.py",
+    "measurement_record_builder": REPO_ROOT / "ifquant" / "adapters.py",
+    "measurement_record_contract": REPO_ROOT / "ifquant" / "contracts.py",
+    "measurement_record_route_adapter": REPO_ROOT / "ifquant" / "route_records.py",
+    "stage2_index_contract": REPO_ROOT / "ifquant" / "stage2_index.py",
+}
+AGGREGATION_RUNTIME_PATHS_BY_ROLE = {
+    **AGGREGATION_CODE_PATHS_BY_ROLE,
+    "python_interpreter": Path(sys.executable).resolve(),
+}
+AGGREGATION_DATA_INPUT_ROLES = (
+    "blinded_review_csv",
+    "study_contract",
+    "review_rubric",
+    "locked_stain_profile",
+    "measurement_record_schema",
+)
+AGGREGATION_AUDIT_INPUT_ROLES = frozenset(
+    (*AGGREGATION_DATA_INPUT_ROLES, *AGGREGATION_RUNTIME_PATHS_BY_ROLE)
+)
+MEASUREMENT_RECORD_PROVENANCE_INPUT_ROLES = (
+    AGGREGATION_AUDIT_INPUT_ROLES | {"declared_source_package_ledger"}
+)
 
 
 class ContractError(RuntimeError):
@@ -228,11 +302,22 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def write_csv(path: Path, fieldnames: list[str], rows: Iterable[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+def _canonical_csv_bytes(
+    fieldnames: Iterable[str], rows: Iterable[dict[str, Any]]
+) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=list(fieldnames), extrasaction="ignore"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")
+
+
+def write_csv(
+    path: Path, fieldnames: Iterable[str], rows: Iterable[dict[str, Any]]
+) -> None:
+    path.write_bytes(_canonical_csv_bytes(fieldnames, rows))
 
 
 def sha256_file(path: Path) -> str:
@@ -1149,6 +1234,7 @@ def _build_review_measurement_records(
     profile_sha256: str,
     measurement_schema_sha256: str,
     code_revision: str,
+    aggregation_runtime_sha256s: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str]:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
@@ -1161,6 +1247,19 @@ def _build_review_measurement_records(
     from ifquant.contracts import (  # pylint: disable=import-outside-toplevel
         MeasurementContractError,
         require_aggregation_batch_eligible,
+    )
+
+    require(
+        set(aggregation_runtime_sha256s) == set(AGGREGATION_RUNTIME_PATHS_BY_ROLE),
+        "H&E measurement provenance must bind the exact Python runtime closure.",
+    )
+    require(
+        all(
+            _is_lower_sha256(value)
+            for value in aggregation_runtime_sha256s.values()
+        )
+        and code_revision == aggregation_runtime_sha256s["aggregation_code"],
+        "H&E code_revision must equal the he_pipeline.py SHA-256.",
     )
 
     profile_id = f"{rubric['rubric_id']}:section-ordinal-schema-v2"
@@ -1272,6 +1371,13 @@ def _build_review_measurement_records(
                                 "role": "measurement_record_schema",
                                 "sha256": measurement_schema_sha256,
                             },
+                            *(
+                                {
+                                    "role": role,
+                                    "sha256": aggregation_runtime_sha256s[role],
+                                }
+                                for role in AGGREGATION_RUNTIME_PATHS_BY_ROLE
+                            ),
                             {
                                 "role": "declared_source_package_ledger",
                                 "sha256": row["source_package_sha256"],
@@ -1435,17 +1541,156 @@ def _technical_section_agreement(
     return output
 
 
-def _review_output_artifacts(output_root: Path) -> list[dict[str, Any]]:
-    roles = {
-        SECTION_SCORES_FILENAME: "unblinded_section_scores",
-        MOUSE_SUMMARY_FILENAME: "paired_technical_section_mouse_summary",
-        TECHNICAL_AGREEMENT_FILENAME: "technical_section_exact_agreement",
-        MEASUREMENT_RECORDS_FILENAME: "schema_v2_measurement_records",
+def _aggregation_input_paths(
+    review_csv: Path,
+    study_path: Path,
+    rubric_path: Path,
+    profile_path: Path,
+) -> dict[str, Path]:
+    paths = {
+        "blinded_review_csv": Path(review_csv).resolve(),
+        "study_contract": Path(study_path).resolve(),
+        "review_rubric": Path(rubric_path).resolve(),
+        "locked_stain_profile": Path(profile_path).resolve(),
+        "measurement_record_schema": MEASUREMENT_RECORD_SCHEMA_PATH.resolve(),
+        **AGGREGATION_RUNTIME_PATHS_BY_ROLE,
     }
+    require(
+        set(paths) == AGGREGATION_AUDIT_INPUT_ROLES,
+        "Aggregation authority path map is not the exact 12-role closure.",
+    )
+    for role, path in paths.items():
+        require(
+            path.is_file(),
+            f"Required aggregation input {role} is missing: {path}",
+        )
+    return paths
+
+
+def _build_expected_review_aggregation(
+    review_csv: Path,
+    study_path: Path,
+    rubric_path: Path,
+    profile_path: Path,
+    input_hashes: dict[str, str],
+) -> dict[str, Any]:
+    study = read_json(study_path)
+    rubric = read_json(rubric_path)
+    profile = read_json(profile_path)
+    require(
+        isinstance(study, dict)
+        and isinstance(rubric, dict)
+        and isinstance(profile, dict),
+        "H&E aggregation JSON authorities must be objects.",
+    )
+    expected_blind_ids = _locked_blind_ids(study)
+    _validate_locked_review_rubric(rubric, study["study_id"])
+    approved = study.get("approved_packages")
+    require(
+        isinstance(approved, dict)
+        and profile.get("profile_id") == approved.get("locked_stain_profile_id")
+        and profile.get("status") == "REVIEWED_LOCKED"
+        and profile.get("study_id") == study["study_id"],
+        "Repository stain profile does not carry the study's locked identity.",
+    )
+
+    # No section identity is looked up until the entire blinded table passes.
+    blinded_rows = _read_locked_review(review_csv, expected_blind_ids)
+    section_rows = _unblinded_section_rows(
+        blinded_rows, _unblinding_index(study), study["study_id"]
+    )
+    (
+        measurement_records,
+        measured_records,
+        measurement_profile_id,
+        measurement_profile_sha256,
+    ) = _build_review_measurement_records(
+        section_rows,
+        rubric=rubric,
+        review_sha256=input_hashes["blinded_review_csv"],
+        study_sha256=input_hashes["study_contract"],
+        rubric_sha256=input_hashes["review_rubric"],
+        profile_sha256=input_hashes["locked_stain_profile"],
+        measurement_schema_sha256=input_hashes["measurement_record_schema"],
+        code_revision=input_hashes["aggregation_code"],
+        aggregation_runtime_sha256s={
+            role: input_hashes[role]
+            for role in AGGREGATION_RUNTIME_PATHS_BY_ROLE
+        },
+    )
+    mouse_summaries = _mouse_ordinal_summaries(section_rows)
+    return {
+        "study": study,
+        "rubric": rubric,
+        "blinded_rows": blinded_rows,
+        "section_rows": section_rows,
+        "measurement_records": measurement_records,
+        "measured_records": measured_records,
+        "measurement_profile_id": measurement_profile_id,
+        "measurement_profile_sha256": measurement_profile_sha256,
+        "mouse_summaries": mouse_summaries,
+        "technical_agreement": _technical_section_agreement(mouse_summaries),
+    }
+
+
+def _aggregation_review_contract(blinded_rows: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "review_unit": "blinded_whole_section",
+        "locked_row_count": 8,
+        "validated_row_count": len(blinded_rows),
+        "locked_header": list(LOCKED_REVIEW_FIELDS),
+        "header_sha256": canonical_value_sha256(list(LOCKED_REVIEW_FIELDS)),
+        "all_required_cells_complete": True,
+        "all_review_timestamps_explicit_utc": True,
+        "unblinding_performed_after_full_validation": True,
+    }
+
+
+def _aggregation_measurement_record_contract(
+    expected: dict[str, Any], input_hashes: dict[str, str]
+) -> dict[str, Any]:
+    records = expected["measurement_records"]
+    measured = expected["measured_records"]
+    return {
+        "schema_version": "2.0.0",
+        "schema_sha256": input_hashes["measurement_record_schema"],
+        "track": "he_pathology",
+        "record_level": "section",
+        "measurement_profile_id": expected["measurement_profile_id"],
+        "measurement_profile_sha256": expected["measurement_profile_sha256"],
+        "record_count": len(records),
+        "measured_record_count": len(measured),
+        "explicit_nonmeasured_record_count": len(records) - len(measured),
+        "measured_records_aggregation_eligibility_checked": True,
+        "estimand_scope": "observed_units",
+        "review_status": "accepted",
+    }
+
+
+def _aggregation_statistical_policy() -> dict[str, Any]:
+    return {
+        "biological_unit": "mouse",
+        "technical_sections_per_mouse": 2,
+        "technical_sections_are_biological_replicates": False,
+        "ordinal_scalar_composite_emitted": False,
+        "retained_descriptors": [
+            "ordered_section_values",
+            "minimum_observed_rank",
+            "maximum_observed_rank",
+            "exact_agreement",
+        ],
+        "group_inference_supported": False,
+    }
+
+
+def _review_output_artifacts(output_root: Path) -> list[dict[str, Any]]:
     artifacts = []
-    for filename, role in roles.items():
+    for filename, role in AGGREGATION_OUTPUT_ROLES_BY_FILENAME.items():
         path = output_root / filename
-        require(path.is_file(), f"Aggregation output is missing: {filename}")
+        require(
+            path.is_file() and not path.is_symlink(),
+            f"Aggregation output is missing or is not a regular file: {filename}",
+        )
         artifacts.append(
             {
                 "role": role,
@@ -1463,10 +1708,156 @@ def _audit_payload_sha256(audit: dict[str, Any]) -> str:
     )
 
 
-def validate_review_aggregation_audit(output_root: Path) -> dict[str, Any]:
-    require(output_root.is_dir(), f"Aggregation package is missing: {output_root}")
+def _aggregation_audit_input_hashes(
+    audit: dict[str, Any], input_paths: dict[str, Path]
+) -> dict[str, str]:
+    inputs = audit.get("input_artifacts")
+    require(
+        isinstance(inputs, list) and len(inputs) == len(AGGREGATION_AUDIT_INPUT_ROLES),
+        "Aggregation audit input ledger has the wrong number of rows.",
+    )
+    hashes: dict[str, str] = {}
+    for artifact in inputs:
+        require(
+            isinstance(artifact, dict)
+            and set(artifact) == {"role", "sha256"},
+            "Aggregation audit input artifact schema is invalid.",
+        )
+        role = artifact["role"]
+        digest = artifact["sha256"]
+        require(
+            isinstance(role, str)
+            and role not in hashes
+            and _is_lower_sha256(digest),
+            "Aggregation audit input role is duplicated or has an invalid SHA-256.",
+        )
+        hashes[role] = digest
+    require(
+        set(hashes) == AGGREGATION_AUDIT_INPUT_ROLES,
+        "Aggregation audit does not bind the exact data and Python import closure.",
+    )
+    require(
+        set(input_paths) == AGGREGATION_AUDIT_INPUT_ROLES,
+        "Aggregation validation lacks the exact authoritative input path closure.",
+    )
+    for role, path in input_paths.items():
+        require(
+            path.is_file() and hashes[role] == sha256_file(path),
+            f"Aggregation audit input does not match its authority: {role}",
+        )
+    return hashes
+
+
+def _require_exact_json_value(actual: Any, expected: Any, label: str) -> None:
+    require(
+        actual == expected
+        and canonical_value_sha256(actual) == canonical_value_sha256(expected),
+        f"{label} is not the exact locked value.",
+    )
+
+
+def _canonical_measurement_jsonl_bytes(records: Iterable[dict[str, Any]]) -> bytes:
+    return "".join(
+        json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+        for record in records
+    ).encode("utf-8")
+
+
+def _validate_measurement_record_payload(
+    record_path: Path, expected_records: list[dict[str, Any]]
+) -> None:
+    try:
+        payload = record_path.read_bytes()
+        text = payload.decode("utf-8")
+        lines = text.splitlines()
+        require(
+            payload.endswith(b"\n")
+            and len(lines) == len(expected_records)
+            and all(bool(line) for line in lines),
+            "H&E measurement-record JSONL framing is not exact.",
+        )
+        records = [json.loads(line) for line in lines]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(
+            "H&E measurement-record JSONL cannot be parsed for validation."
+        ) from exc
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from ifquant.contracts import (  # pylint: disable=import-outside-toplevel
+        MeasurementContractError,
+        validate_measurement_record,
+    )
+
+    for index, record in enumerate(records):
+        try:
+            validate_measurement_record(record)
+        except MeasurementContractError as exc:
+            raise ContractError(
+                f"H&E measurement record {index} violates the shared schema-v2 contract: {exc}"
+            ) from exc
+    require(
+        records == expected_records,
+        "H&E measurement-record payload disagrees with the authoritative review/study reconstruction.",
+    )
+    require(
+        payload == _canonical_measurement_jsonl_bytes(expected_records),
+        "H&E measurement-record JSONL bytes are not the canonical expected payload.",
+    )
+
+
+def _require_exact_aggregation_entries(output_root: Path) -> None:
+    expected_names = set(AGGREGATION_OUTPUT_ROLES_BY_FILENAME) | {
+        AGGREGATION_AUDIT_FILENAME
+    }
+    entries = list(output_root.iterdir())
+    require(
+        len(entries) == len(expected_names)
+        and {path.name for path in entries} == expected_names
+        and all(path.is_file() and not path.is_symlink() for path in entries),
+        "Aggregation package must contain exactly five direct regular non-symlink files.",
+    )
+
+
+def validate_review_aggregation_audit(
+    output_root: Path,
+    review_csv: Path | None = None,
+    study_path: Path = DEFAULT_STUDY,
+    rubric_path: Path = DEFAULT_RUBRIC,
+    profile_path: Path = DEFAULT_REPO_PROFILE,
+) -> dict[str, Any]:
+    """Validate a package against explicit, content-hashed source authorities."""
+
+    requested_output_root = Path(output_root)
+    require(
+        not requested_output_root.is_symlink(),
+        f"Aggregation package root must not be a symlink: {requested_output_root}",
+    )
+    output_root = requested_output_root.resolve()
+    require(
+        output_root.is_dir(),
+        f"Aggregation package is missing or is not a regular directory: {output_root}",
+    )
+    require(
+        review_csv is not None,
+        "Aggregation validation requires the authoritative blinded-review CSV path.",
+    )
+    input_paths = _aggregation_input_paths(
+        review_csv, study_path, rubric_path, profile_path
+    )
+    _require_exact_aggregation_entries(output_root)
     audit_path = output_root / AGGREGATION_AUDIT_FILENAME
-    audit = read_json(audit_path)
+    try:
+        audit = read_json(audit_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("Aggregation audit JSON cannot be parsed.") from exc
     expected_fields = {
         "schema_version",
         "audit_type",
@@ -1481,7 +1872,10 @@ def validate_review_aggregation_audit(output_root: Path) -> dict[str, Any]:
         "output_artifacts",
         "audit_payload_sha256",
     }
-    require(set(audit) == expected_fields, "Aggregation audit fields are not exact.")
+    require(
+        isinstance(audit, dict) and set(audit) == expected_fields,
+        "Aggregation audit fields are not exact.",
+    )
     require(
         audit.get("schema_version") == "1.0.0"
         and audit.get("audit_type") == "he_blinded_review_aggregation"
@@ -1489,20 +1883,51 @@ def validate_review_aggregation_audit(output_root: Path) -> dict[str, Any]:
         == "ACCEPTED_REVIEW_AGGREGATED_DESCRIPTIVE_ONLY",
         "Aggregation audit identity or status is invalid.",
     )
+    require(
+        isinstance(audit.get("created_utc"), str),
+        "Aggregation audit created_utc must be a string.",
+    )
     _parse_utc(audit["created_utc"], "Aggregation audit created_utc")
     require(
         _is_lower_sha256(audit.get("audit_payload_sha256"))
         and audit["audit_payload_sha256"] == _audit_payload_sha256(audit),
         "Aggregation audit payload hash mismatch.",
     )
+    input_hashes = _aggregation_audit_input_hashes(audit, input_paths)
+    expected = _build_expected_review_aggregation(
+        input_paths["blinded_review_csv"],
+        input_paths["study_contract"],
+        input_paths["review_rubric"],
+        input_paths["locked_stain_profile"],
+        input_hashes,
+    )
+    require(
+        audit.get("study_id") == expected["study"]["study_id"]
+        and audit.get("rubric_id") == expected["rubric"]["rubric_id"],
+        "Aggregation audit study/rubric identity is not authoritative.",
+    )
+    _require_exact_json_value(
+        audit.get("review_contract"),
+        _aggregation_review_contract(expected["blinded_rows"]),
+        "Aggregation review contract",
+    )
+    _require_exact_json_value(
+        audit.get("measurement_record_contract"),
+        _aggregation_measurement_record_contract(expected, input_hashes),
+        "Aggregation measurement-record contract",
+    )
+    _require_exact_json_value(
+        audit.get("statistical_policy"),
+        _aggregation_statistical_policy(),
+        "Aggregation statistical policy",
+    )
+
     outputs = audit.get("output_artifacts")
-    require(isinstance(outputs, list) and len(outputs) == 4, "Audit output ledger is incomplete.")
-    expected_names = {
-        SECTION_SCORES_FILENAME,
-        MOUSE_SUMMARY_FILENAME,
-        TECHNICAL_AGREEMENT_FILENAME,
-        MEASUREMENT_RECORDS_FILENAME,
-    }
+    require(
+        isinstance(outputs, list)
+        and len(outputs) == len(AGGREGATION_OUTPUT_ROLES_BY_FILENAME),
+        "Audit output ledger is incomplete.",
+    )
     observed_names: set[str] = set()
     for artifact in outputs:
         require(
@@ -1513,26 +1938,69 @@ def validate_review_aggregation_audit(output_root: Path) -> dict[str, Any]:
         relative_path = artifact["relative_path"]
         require(
             isinstance(relative_path, str)
-            and relative_path in expected_names
+            and relative_path in AGGREGATION_OUTPUT_ROLES_BY_FILENAME
             and relative_path not in observed_names,
             "Audit output path is unknown or duplicated.",
+        )
+        require(
+            artifact["role"]
+            == AGGREGATION_OUTPUT_ROLES_BY_FILENAME[relative_path],
+            f"Audit output role disagrees with its path: {relative_path}",
         )
         observed_names.add(relative_path)
         path = output_root / relative_path
         require(
-            path.is_file()
+            isinstance(artifact["bytes"], int)
+            and not isinstance(artifact["bytes"], bool)
+            and artifact["bytes"] > 0
+            and _is_lower_sha256(artifact["sha256"])
+            and path.is_file()
+            and not path.is_symlink()
             and path.stat().st_size == artifact["bytes"]
             and sha256_file(path) == artifact["sha256"],
             f"Published aggregation artifact failed integrity: {relative_path}",
         )
-    require(observed_names == expected_names, "Audit output ledger is not exact.")
-    observed_files = {
-        path.name for path in output_root.iterdir() if path.is_file()
-    }
     require(
-        observed_files == expected_names | {AGGREGATION_AUDIT_FILENAME},
-        "Aggregation package contains untracked or missing files.",
+        observed_names == set(AGGREGATION_OUTPUT_ROLES_BY_FILENAME),
+        "Audit output ledger is not exact.",
     )
+
+    expected_payloads = (
+        (
+            SECTION_SCORES_FILENAME,
+            SECTION_SCORE_FIELDS,
+            expected["section_rows"],
+            "H&E section-score",
+        ),
+        (
+            MOUSE_SUMMARY_FILENAME,
+            MOUSE_SUMMARY_FIELDS,
+            expected["mouse_summaries"],
+            "H&E mouse-summary",
+        ),
+        (
+            TECHNICAL_AGREEMENT_FILENAME,
+            TECHNICAL_AGREEMENT_FIELDS,
+            expected["technical_agreement"],
+            "H&E technical-agreement",
+        ),
+    )
+    for filename, fields, rows, label in expected_payloads:
+        require(
+            (output_root / filename).read_bytes()
+            == _canonical_csv_bytes(fields, rows),
+            f"{label} CSV disagrees with the authoritative reconstruction.",
+        )
+    _validate_measurement_record_payload(
+        output_root / MEASUREMENT_RECORDS_FILENAME,
+        expected["measurement_records"],
+    )
+    _require_exact_aggregation_entries(output_root)
+    for role, path in input_paths.items():
+        require(
+            sha256_file(path) == input_hashes[role],
+            f"Aggregation authority changed during validation: {role}",
+        )
     return audit
 
 
@@ -1552,7 +2020,6 @@ def aggregate_review(
     study_path = study_path.resolve()
     rubric_path = rubric_path.resolve()
     profile_path = profile_path.resolve()
-    script_path = Path(__file__).resolve()
     require(
         not output_root.exists(),
         f"Refusing to overwrite existing output: {output_root}",
@@ -1561,102 +2028,20 @@ def aggregate_review(
         output_root.parent.is_dir(),
         f"Aggregation output parent does not exist: {output_root.parent}",
     )
-    input_paths = {
-        "blinded_review_csv": review_csv,
-        "study_contract": study_path,
-        "review_rubric": rubric_path,
-        "locked_stain_profile": profile_path,
-        "measurement_record_schema": MEASUREMENT_RECORD_SCHEMA_PATH,
-        "aggregation_code": script_path,
-    }
-    for role, path in input_paths.items():
-        require(path.is_file(), f"Required aggregation input {role} is missing: {path}")
+    input_paths = _aggregation_input_paths(
+        review_csv, study_path, rubric_path, profile_path
+    )
     input_hashes = {role: sha256_file(path) for role, path in input_paths.items()}
-
-    study = read_json(study_path)
-    rubric = read_json(rubric_path)
-    profile = read_json(profile_path)
-    expected_blind_ids = _locked_blind_ids(study)
-    _validate_locked_review_rubric(rubric, study["study_id"])
-    approved = study.get("approved_packages")
-    require(
-        isinstance(approved, dict)
-        and profile.get("profile_id") == approved.get("locked_stain_profile_id")
-        and profile.get("status") == "REVIEWED_LOCKED"
-        and profile.get("study_id") == study["study_id"],
-        "Repository stain profile does not carry the study's locked identity.",
+    expected = _build_expected_review_aggregation(
+        review_csv, study_path, rubric_path, profile_path, input_hashes
     )
-
-    # No section identity is looked up until the entire blinded table passes.
-    blinded_rows = _read_locked_review(review_csv, expected_blind_ids)
-    unblinding_index = _unblinding_index(study)
-    section_rows = _unblinded_section_rows(
-        blinded_rows, unblinding_index, study["study_id"]
-    )
-    (
-        measurement_records,
-        measured_records,
-        measurement_profile_id,
-        measurement_profile_sha256,
-    ) = _build_review_measurement_records(
-        section_rows,
-        rubric=rubric,
-        review_sha256=input_hashes["blinded_review_csv"],
-        study_sha256=input_hashes["study_contract"],
-        rubric_sha256=input_hashes["review_rubric"],
-        profile_sha256=input_hashes["locked_stain_profile"],
-        measurement_schema_sha256=input_hashes[
-            "measurement_record_schema"
-        ],
-        code_revision=input_hashes["aggregation_code"],
-    )
-    # The eligibility gate above runs before these records are consumed into
-    # paired descriptive summaries.
-    mouse_summaries = _mouse_ordinal_summaries(section_rows)
-    technical_agreement = _technical_section_agreement(mouse_summaries)
-
-    section_fields = [
-        "study_id",
-        "mouse_id",
-        "genotype",
-        "condition",
-        "section_id",
-        "technical_section_order",
-        "source_package_sha256",
-        "section_evaluability",
-        *LOCKED_REVIEW_FIELDS,
-    ]
-    mouse_fields = [
-        "study_id",
-        "mouse_id",
-        "genotype",
-        "condition",
-        "endpoint_id",
-        "scale_id",
-        "section_1_id",
-        "section_1_reviewability",
-        "section_1_value",
-        "section_2_id",
-        "section_2_reviewability",
-        "section_2_value",
-        "ordered_section_values_json",
-        "n_evaluable_sections",
-        "paired_evaluability",
-        "minimum_observed_rank",
-        "maximum_observed_rank",
-        "exact_agreement",
-    ]
-    agreement_fields = [
-        "study_id",
-        "endpoint_id",
-        "scale_id",
-        "n_mouse_pairs_declared",
-        "n_pairs_both_evaluable",
-        "n_pairs_not_both_evaluable",
-        "n_exact_agreement",
-        "exact_agreement_fraction",
-        "ordered_mouse_pairs_json",
-    ]
+    study = expected["study"]
+    rubric = expected["rubric"]
+    blinded_rows = expected["blinded_rows"]
+    section_rows = expected["section_rows"]
+    measurement_records = expected["measurement_records"]
+    mouse_summaries = expected["mouse_summaries"]
+    technical_agreement = expected["technical_agreement"]
 
     staging: Path | None = None
     try:
@@ -1665,11 +2050,19 @@ def aggregate_review(
                 prefix=f".{output_root.name}.staging-", dir=output_root.parent
             )
         )
-        write_csv(staging / SECTION_SCORES_FILENAME, section_fields, section_rows)
-        write_csv(staging / MOUSE_SUMMARY_FILENAME, mouse_fields, mouse_summaries)
+        write_csv(
+            staging / SECTION_SCORES_FILENAME,
+            SECTION_SCORE_FIELDS,
+            section_rows,
+        )
+        write_csv(
+            staging / MOUSE_SUMMARY_FILENAME,
+            MOUSE_SUMMARY_FIELDS,
+            mouse_summaries,
+        )
         write_csv(
             staging / TECHNICAL_AGREEMENT_FILENAME,
-            agreement_fields,
+            TECHNICAL_AGREEMENT_FIELDS,
             technical_agreement,
         )
         try:
@@ -1696,47 +2089,11 @@ def aggregate_review(
             "created_utc": utc_now(),
             "study_id": study["study_id"],
             "rubric_id": rubric["rubric_id"],
-            "review_contract": {
-                "review_unit": "blinded_whole_section",
-                "locked_row_count": 8,
-                "validated_row_count": len(blinded_rows),
-                "locked_header": list(LOCKED_REVIEW_FIELDS),
-                "header_sha256": canonical_value_sha256(
-                    list(LOCKED_REVIEW_FIELDS)
-                ),
-                "all_required_cells_complete": True,
-                "all_review_timestamps_explicit_utc": True,
-                "unblinding_performed_after_full_validation": True,
-            },
-            "measurement_record_contract": {
-                "schema_version": "2.0.0",
-                "schema_sha256": input_hashes["measurement_record_schema"],
-                "track": "he_pathology",
-                "record_level": "section",
-                "measurement_profile_id": measurement_profile_id,
-                "measurement_profile_sha256": measurement_profile_sha256,
-                "record_count": len(measurement_records),
-                "measured_record_count": len(measured_records),
-                "explicit_nonmeasured_record_count": (
-                    len(measurement_records) - len(measured_records)
-                ),
-                "measured_records_aggregation_eligibility_checked": True,
-                "estimand_scope": "observed_units",
-                "review_status": "accepted",
-            },
-            "statistical_policy": {
-                "biological_unit": "mouse",
-                "technical_sections_per_mouse": 2,
-                "technical_sections_are_biological_replicates": False,
-                "ordinal_scalar_composite_emitted": False,
-                "retained_descriptors": [
-                    "ordered_section_values",
-                    "minimum_observed_rank",
-                    "maximum_observed_rank",
-                    "exact_agreement",
-                ],
-                "group_inference_supported": False,
-            },
+            "review_contract": _aggregation_review_contract(blinded_rows),
+            "measurement_record_contract": (
+                _aggregation_measurement_record_contract(expected, input_hashes)
+            ),
+            "statistical_policy": _aggregation_statistical_policy(),
             "input_artifacts": [
                 {"role": role, "sha256": digest}
                 for role, digest in input_hashes.items()
@@ -1747,7 +2104,9 @@ def aggregate_review(
         audit["audit_payload_sha256"] = _audit_payload_sha256(audit)
         # The audit is deliberately the last artifact written in the staging package.
         write_json(staging / AGGREGATION_AUDIT_FILENAME, audit)
-        validate_review_aggregation_audit(staging)
+        validate_review_aggregation_audit(
+            staging, review_csv, study_path, rubric_path, profile_path
+        )
 
         if _before_publish is not None:
             _before_publish()
@@ -1756,14 +2115,18 @@ def aggregate_review(
                 sha256_file(path) == input_hashes[role],
                 f"Aggregation input changed before publication: {role}",
             )
-        validate_review_aggregation_audit(staging)
+        validate_review_aggregation_audit(
+            staging, review_csv, study_path, rubric_path, profile_path
+        )
         require(
             not output_root.exists(),
             f"Refusing to overwrite existing output: {output_root}",
         )
         staging.rename(output_root)
         staging = None
-        return validate_review_aggregation_audit(output_root)
+        return validate_review_aggregation_audit(
+            output_root, review_csv, study_path, rubric_path, profile_path
+        )
     finally:
         if staging is not None and staging.exists():
             require(

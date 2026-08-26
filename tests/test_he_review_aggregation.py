@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,43 @@ class HeReviewAggregationTests(unittest.TestCase):
         )
         return output, audit
 
+    def _validate(self, output):
+        return he_pipeline.validate_review_aggregation_audit(
+            output,
+            self.review_csv,
+            he_pipeline.DEFAULT_STUDY,
+            he_pipeline.DEFAULT_RUBRIC,
+            he_pipeline.DEFAULT_REPO_PROFILE,
+        )
+
+    @staticmethod
+    def _write_audit(output, audit):
+        audit["audit_payload_sha256"] = he_pipeline._audit_payload_sha256(audit)
+        he_pipeline.write_json(
+            output / he_pipeline.AGGREGATION_AUDIT_FILENAME, audit
+        )
+
+    @classmethod
+    def _reseal_output(cls, output, audit, filename):
+        path = output / filename
+        for artifact in audit["output_artifacts"]:
+            if artifact["relative_path"] == filename:
+                artifact["bytes"] = path.stat().st_size
+                artifact["sha256"] = he_pipeline.sha256_file(path)
+                break
+        else:
+            raise AssertionError(f"Missing output ledger row for {filename}")
+        cls._write_audit(output, audit)
+
+    @staticmethod
+    def _write_csv_mutation(path, column, value):
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        rows[0][column] = value
+        he_pipeline.write_csv(path, fieldnames, rows)
+
     def test_valid_review_publishes_descriptive_outputs_and_schema_v2_records(self):
         output, audit = self._aggregate()
 
@@ -109,6 +147,54 @@ class HeReviewAggregationTests(unittest.TestCase):
         self.assertIn(
             "measurement_record_schema",
             {item["role"] for item in audit["input_artifacts"]},
+        )
+        expected_code_paths = {
+            "aggregation_code": MODULE_PATH.resolve(),
+            "ifquant_package_init": ROOT / "ifquant" / "__init__.py",
+            "measurement_record_builder": ROOT / "ifquant" / "adapters.py",
+            "measurement_record_contract": ROOT / "ifquant" / "contracts.py",
+            "measurement_record_route_adapter": (
+                ROOT / "ifquant" / "route_records.py"
+            ),
+            "stage2_index_contract": ROOT / "ifquant" / "stage2_index.py",
+        }
+        self.assertEqual(
+            he_pipeline.AGGREGATION_CODE_PATHS_BY_ROLE,
+            expected_code_paths,
+        )
+        expected_runtime_paths = {
+            **expected_code_paths,
+            "python_interpreter": Path(sys.executable).resolve(),
+        }
+        self.assertEqual(
+            he_pipeline.AGGREGATION_RUNTIME_PATHS_BY_ROLE,
+            expected_runtime_paths,
+        )
+        expected_input_paths = {
+            "blinded_review_csv": self.review_csv,
+            "study_contract": he_pipeline.DEFAULT_STUDY,
+            "review_rubric": he_pipeline.DEFAULT_RUBRIC,
+            "locked_stain_profile": he_pipeline.DEFAULT_REPO_PROFILE,
+            "measurement_record_schema": (
+                he_pipeline.MEASUREMENT_RECORD_SCHEMA_PATH
+            ),
+            **expected_runtime_paths,
+        }
+        audit_input_hashes = {
+            item["role"]: item["sha256"]
+            for item in audit["input_artifacts"]
+        }
+        self.assertEqual(len(audit_input_hashes), 12)
+        self.assertEqual(
+            set(audit_input_hashes),
+            he_pipeline.AGGREGATION_AUDIT_INPUT_ROLES,
+        )
+        self.assertEqual(
+            audit_input_hashes,
+            {
+                role: he_pipeline.sha256_file(path)
+                for role, path in expected_input_paths.items()
+            },
         )
         self.assertEqual(
             audit["measurement_record_contract"][
@@ -178,6 +264,22 @@ class HeReviewAggregationTests(unittest.TestCase):
                 for record in records
             )
         )
+        for record in records:
+            record_input_hashes = {
+                item["role"]: item["sha256"]
+                for item in record["provenance"]["inputs"]
+            }
+            self.assertEqual(len(record_input_hashes), 13)
+            self.assertEqual(
+                set(record_input_hashes),
+                he_pipeline.MEASUREMENT_RECORD_PROVENANCE_INPUT_ROLES,
+            )
+            self.assertEqual(
+                record["provenance"]["code_revision"],
+                audit_input_hashes["aggregation_code"],
+            )
+            for role, digest in audit_input_hashes.items():
+                self.assertEqual(record_input_hashes[role], digest)
         nonmeasured = [
             record
             for record in records
@@ -191,7 +293,7 @@ class HeReviewAggregationTests(unittest.TestCase):
                 for record in nonmeasured
             )
         )
-        he_pipeline.validate_review_aggregation_audit(output)
+        self._validate(output)
 
         with self.assertRaisesRegex(he_pipeline.ContractError, "Refusing to overwrite"):
             self._aggregate()
@@ -254,7 +356,220 @@ class HeReviewAggregationTests(unittest.TestCase):
         section_path = output / he_pipeline.SECTION_SCORES_FILENAME
         section_path.write_bytes(section_path.read_bytes() + b"tamper")
         with self.assertRaisesRegex(he_pipeline.ContractError, "failed integrity"):
+            self._validate(output)
+
+    def test_resealed_audit_cannot_drop_or_rename_import_closure_roles(self):
+        output, audit = self._aggregate("closure-role-tamper")
+        for artifact in audit["input_artifacts"]:
+            if artifact["role"] == "stage2_index_contract":
+                artifact["role"] = "stage2_index"
+                break
+        audit["audit_payload_sha256"] = he_pipeline._audit_payload_sha256(audit)
+        he_pipeline.write_json(
+            output / he_pipeline.AGGREGATION_AUDIT_FILENAME, audit
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "exact data and Python import closure"
+        ):
+            self._validate(output)
+
+    def test_resealed_audit_cannot_substitute_runtime_hashes(self):
+        output, audit = self._aggregate("closure-audit-hash-tamper")
+        for artifact in audit["input_artifacts"]:
+            if artifact["role"] == "python_interpreter":
+                artifact["sha256"] = "0" * 64
+                break
+        audit["audit_payload_sha256"] = he_pipeline._audit_payload_sha256(audit)
+        he_pipeline.write_json(
+            output / he_pipeline.AGGREGATION_AUDIT_FILENAME, audit
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError,
+            "input does not match its authority: python_interpreter",
+        ):
+            self._validate(output)
+
+    def test_resealed_record_cannot_disagree_with_import_closure_hashes(self):
+        output, audit = self._aggregate("closure-hash-tamper")
+        records_path = output / he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        records = [
+            json.loads(line)
+            for line in records_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for artifact in records[0]["provenance"]["inputs"]:
+            if artifact["role"] == "measurement_record_route_adapter":
+                artifact["sha256"] = "0" * 64
+                break
+        records_path.write_text(
+            "".join(
+                json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+                + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+        for artifact in audit["output_artifacts"]:
+            if artifact["relative_path"] == he_pipeline.MEASUREMENT_RECORDS_FILENAME:
+                artifact["bytes"] = records_path.stat().st_size
+                artifact["sha256"] = he_pipeline.sha256_file(records_path)
+                break
+        audit["audit_payload_sha256"] = he_pipeline._audit_payload_sha256(audit)
+        he_pipeline.write_json(
+            output / he_pipeline.AGGREGATION_AUDIT_FILENAME, audit
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError,
+            "measurement-record payload disagrees",
+        ):
+            self._validate(output)
+
+    def test_standalone_validation_requires_the_blinded_review_authority(self):
+        output, _ = self._aggregate("authority-required")
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "requires the authoritative blinded-review"
+        ):
             he_pipeline.validate_review_aggregation_audit(output)
+
+    def test_resealed_audit_cannot_widen_statistical_policy(self):
+        output, audit = self._aggregate("policy-tamper")
+        audit["statistical_policy"]["group_inference_supported"] = True
+        audit["statistical_policy"]["ordinal_scalar_composite_emitted"] = True
+        self._write_audit(output, audit)
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "statistical policy is not the exact locked value"
+        ):
+            self._validate(output)
+
+    def test_resealed_audit_cannot_rename_an_output_role(self):
+        output, audit = self._aggregate("output-role-tamper")
+        audit["output_artifacts"][0]["role"] = "renamed_scientific_role"
+        self._write_audit(output, audit)
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "output role disagrees with its path"
+        ):
+            self._validate(output)
+
+    def test_untracked_directory_and_nested_file_invalidate_package(self):
+        output, _ = self._aggregate("extra-directory")
+        unexpected = output / "UNTRACKED"
+        unexpected.mkdir()
+        (unexpected / "extra.txt").write_text("extra", encoding="utf-8")
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError,
+            "exactly five direct regular non-symlink files",
+        ):
+            self._validate(output)
+
+    def test_symlinked_package_root_is_rejected_when_supported(self):
+        output, _ = self._aggregate("symlink-target")
+        link = self.root / "symlink-package"
+        try:
+            link.symlink_to(output, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"Directory symlinks are unavailable: {exc}")
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "package root must not be a symlink"
+        ):
+            self._validate(link)
+
+    def test_resealed_data_authority_hash_cannot_be_substituted(self):
+        output, audit = self._aggregate("data-authority-tamper")
+        replacement = "0" * 64
+        for artifact in audit["input_artifacts"]:
+            if artifact["role"] == "blinded_review_csv":
+                artifact["sha256"] = replacement
+                break
+        records_path = output / he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        records = [
+            json.loads(line)
+            for line in records_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for record in records:
+            for artifact in record["provenance"]["inputs"]:
+                if artifact["role"] == "blinded_review_csv":
+                    artifact["sha256"] = replacement
+                    break
+        records_path.write_bytes(
+            he_pipeline._canonical_measurement_jsonl_bytes(records)
+        )
+        self._reseal_output(
+            output, audit, he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError,
+            "input does not match its authority: blinded_review_csv",
+        ):
+            self._validate(output)
+
+    def test_resealed_record_cannot_substitute_source_package_ledger(self):
+        output, audit = self._aggregate("source-ledger-tamper")
+        records_path = output / he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        records = [
+            json.loads(line)
+            for line in records_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for artifact in records[0]["provenance"]["inputs"]:
+            if artifact["role"] == "declared_source_package_ledger":
+                artifact["sha256"] = "0" * 64
+                break
+        records_path.write_bytes(
+            he_pipeline._canonical_measurement_jsonl_bytes(records)
+        )
+        self._reseal_output(
+            output, audit, he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "measurement-record payload disagrees"
+        ):
+            self._validate(output)
+
+    def test_resealed_invalid_ordinal_record_fails_shared_contract(self):
+        output, audit = self._aggregate("ordinal-rank-tamper")
+        records_path = output / he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        records = [
+            json.loads(line)
+            for line in records_path.read_text(encoding="utf-8").splitlines()
+        ]
+        records[0]["endpoint"]["rank"] = 999
+        records_path.write_bytes(
+            he_pipeline._canonical_measurement_jsonl_bytes(records)
+        )
+        self._reseal_output(
+            output, audit, he_pipeline.MEASUREMENT_RECORDS_FILENAME
+        )
+        with self.assertRaisesRegex(
+            he_pipeline.ContractError, "violates the shared schema-v2 contract"
+        ):
+            self._validate(output)
+
+    def test_resealed_csv_payloads_must_match_authoritative_reconstruction(self):
+        mutations = (
+            (
+                he_pipeline.SECTION_SCORES_FILENAME,
+                "whole_section_inflammation_extent_0_4_uncertain",
+                "4",
+                "section-score CSV disagrees",
+            ),
+            (
+                he_pipeline.MOUSE_SUMMARY_FILENAME,
+                "minimum_observed_rank",
+                "4",
+                "mouse-summary CSV disagrees",
+            ),
+            (
+                he_pipeline.TECHNICAL_AGREEMENT_FILENAME,
+                "n_exact_agreement",
+                "99",
+                "technical-agreement CSV disagrees",
+            ),
+        )
+        for index, (filename, column, value, message) in enumerate(mutations):
+            with self.subTest(filename=filename):
+                output, audit = self._aggregate(f"csv-tamper-{index}")
+                self._write_csv_mutation(output / filename, column, value)
+                self._reseal_output(output, audit, filename)
+                with self.assertRaisesRegex(he_pipeline.ContractError, message):
+                    self._validate(output)
 
 
 if __name__ == "__main__":
