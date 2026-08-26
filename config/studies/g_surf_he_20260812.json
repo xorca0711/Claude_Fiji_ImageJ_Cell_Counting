@@ -22,12 +22,12 @@
     ]
   },
   "approved_packages": {
-    "r1_root": "D:\\IFQ_Runs\\H&E_20260812\\10_R1_IMAGE_QC_APPROVED_FINAL",
+    "r1_root": "D:\\IFQ_Runs\\H&E_20260812\\legacy\\pre_mapping_analysis_20260818\\10_R1_IMAGE_QC_APPROVED_FINAL",
     "r1_approval_sha256": "77fbdc19706dd556e21416084711565c7a50fc9b84449994ac91c7a1272c7be8",
     "r1_package_manifest_sha256": "bbc83589c64bdc68dfb9f023ec365024f9f467614eb9cda1abf8f3f740f421cd",
     "locked_stain_profile_id": "g_surf_he_20260812_reviewed_locked_v1",
     "locked_stain_profile_sha256": "371bb0d424a66831789c3907ce990ad071f3979fec9fef119bfa2eb95e957baf",
-    "h4_development_root": "D:\\IFQ_Runs\\H&E_20260812\\13_H4_SPATIALLY_BALANCED_REGION_REVIEW",
+    "h4_development_root": "D:\\IFQ_Runs\\H&E_20260812\\legacy\\pre_mapping_analysis_20260818\\Review\\13_H4_SPATIALLY_BALANCED_REGION_REVIEW",
     "h4_package_manifest_sha256": "7bc1c50d54e0d4e77705105c8cd88cdf4cd7c1fbe23adc7161660cc9b5eba0e3",
     "h4_status": "DEVELOPMENT_CONTEXT_ONLY_NOT_AN_ENDPOINT"
   },
@@ -49,6 +49,19 @@
       "genotype": "IFNg_KO_hom",
       "condition": "PR8_infection",
       "source_file": "IFNg ko(hom) 260325 m2 pr8 infection.vsi",
+      "source_package": {
+        "format": "olympus_vsi",
+        "discovery_authority": "bioformats_ImageReader_getUsedFiles",
+        "package_hash_algorithm": "sha256_utf8_path_tab_size_tab_sha256_lf",
+        "package_sha256": "fc3fb09cb13787d978d5556a1a84a938e2bf6ffd87358188eea1c43769c8cb3e",
+        "members": [
+          {"relative_path": "IFNg ko(hom) 260325 m2 pr8 infection.vsi", "size_bytes": 2541560, "sha256": "91a5c8bdf98f3bb490409a8241ce93fac5760a6198cea2aeb152bed6e5ffc798"},
+          {"relative_path": "_IFNg ko(hom) 260325 m2 pr8 infection_/stack1/frame_t.ets", "size_bytes": 34350275, "sha256": "a534805b413a3e318a51d22e19bc0bc845f064473fac99b11e19bc8a8283dadd"},
+          {"relative_path": "_IFNg ko(hom) 260325 m2 pr8 infection_/stack10000/frame_t.ets", "size_bytes": 40269030, "sha256": "4081116980222f172f2a81d56d6876e6b6fefd48d6185fd424f2d021fe60a0f9"},
+          {"relative_path": "_IFNg ko(hom) 260325 m2 pr8 infection_/stack10002/frame_t.ets", "size_bytes": 662351270, "sha256": "1a0f2aa0727d8e0d1f276aa7e20f85155cdfad8900ff666a60422b7ea2e382d6"},
+          {"relative_path": "_IFNg ko(hom) 260325 m2 pr8 infection_/stack10005/frame_t.ets", "size_bytes": 666928367, "sha256": "b8acd7a155cba2c2fea8818a14563652c00c51145ed4420a76009fb5a6b73cd1"}
+        ]
+      },
       "section_ids": ["M2_BF_01", "M2_BF_02"]
     },
     {
@@ -57,6 +70,19 @@
       "genotype": "IFNg_KO_het",
       "condition": "PR8_infection",
       "source_file": "IFNg ko(het) 260325 m4_1 pr8 infection.vsi",
+      "source_package": {
+        "format": "olympus_vsi",
+        "discovery_authority": "bioformats_ImageReader_getUsedFiles",
+        "package_hash_algorithm": "sha256_utf8_path_tab_size_tab_sha256_lf",
+        "package_sha256": "02bc1064f08850a91a035f2011e7ebac9a7eee20f832675fa57a3ee8672bef52",
+        "members": [
+          {"relative_path": "IFNg ko(het) 260325 m4_1 pr8 infection.vsi", "size_bytes": 2607686, "sha256": "e48ecaa0bb2f61e7c9bd401f986145667108ce84ab892f427d4e873541cd2e74"},
+          {"relative_path": "_IFNg ko(het) 260325 m4_1 pr8 infection_/stack1/frame_t.ets", "size_bytes": 36262516, "sha256": "f2fffe57b076d2396a102d3657d504d2f7a19d4ca06bf6100d8ef0ab58b1ab27"},
+          {"relative_path": "_IFNg ko(het) 260325 m4_1 pr8 infection_/stack10000/frame_t.ets", "size_bytes": 42628567, "sha256": "cb0bb92f7f858367a47bf8e91939f5d41a39851259cb474ba0b0a276db2dd2c1"},
+          {"relative_path": "_IFNg ko(het) 260325 m4_1 pr8 infection_/stack10002/frame_t.ets", "size_bytes": 684066390, "sha256": "91567cbde459dcffbe5b3b9c8130328bec310cf7c492a51c1b074e602ba0b608"},
+          {"relative_path": "_IFNg ko(het) 260325 m4_1 pr8 infection_/stack10005/frame_t.ets", "size_bytes": 671134294, "sha256": "c6f05fa173ce6fb3233fd968b30cfc11fc6f286c6cae297ef1526a9880a78814"}
+        ]
+      },
       "section_ids": ["M4-1_BF_01", "M4-1_BF_02"]
     },
     {
@@ -65,6 +91,19 @@
       "genotype": "IFNg_KO_het",
       "condition": "PR8_no_infection",
       "source_file": "IFNg ko(het) 260325 m4-2 pr8 no infection.vsi",
+      "source_package": {
+        "format": "olympus_vsi",
+        "discovery_authority": "bioformats_ImageReader_getUsedFiles",
+        "package_hash_algorithm": "sha256_utf8_path_tab_size_tab_sha256_lf",
+        "package_sha256": "d92cfc4ef14eb6721aa9c213a4cfa22d0cdd6603b7b8a7dcbfdfba8c4f5cb6c4",
+        "members": [
+          {"relative_path": "IFNg ko(het) 260325 m4-2 pr8 no infection.vsi", "size_bytes": 2436936, "sha256": "a43c972b485fbfcac67f890fa4c077d0dad62571d0e36c8d44e06e9cf2550014"},
+          {"relative_path": "_IFNg ko(het) 260325 m4-2 pr8 no infection_/stack1/frame_t.ets", "size_bytes": 36238499, "sha256": "27038bc960524b6c0369ecf2ba46bb5e0b941b6bab300aae7e072d5d6323fa87"},
+          {"relative_path": "_IFNg ko(het) 260325 m4-2 pr8 no infection_/stack10000/frame_t.ets", "size_bytes": 37034927, "sha256": "ad036e6d997aec2ac642783aef212066fdef1becd0d22d0bcbe7fcb61930f81d"},
+          {"relative_path": "_IFNg ko(het) 260325 m4-2 pr8 no infection_/stack10002/frame_t.ets", "size_bytes": 535877426, "sha256": "c3608e909cc77680142100513424e2ee130357cf2fcc02ac0a0b9f7349fc8d30"},
+          {"relative_path": "_IFNg ko(het) 260325 m4-2 pr8 no infection_/stack10005/frame_t.ets", "size_bytes": 556918461, "sha256": "64401a08b5784ff1ce03ac01791dfbd84ed3d28ce5b27935fbf557636569439b"}
+        ]
+      },
       "section_ids": ["M4-2_BF_01", "M4-2_BF_02"]
     },
     {
@@ -73,6 +112,19 @@
       "genotype": "IFNg_KO_hom",
       "condition": "PR8_no_infection",
       "source_file": "IFNg ko(hom) 260325 m6 pr8 no infection.vsi",
+      "source_package": {
+        "format": "olympus_vsi",
+        "discovery_authority": "bioformats_ImageReader_getUsedFiles",
+        "package_hash_algorithm": "sha256_utf8_path_tab_size_tab_sha256_lf",
+        "package_sha256": "8851b6335095073bc6d212c540c679f884edfd009638bd561c9b033540ad20df",
+        "members": [
+          {"relative_path": "IFNg ko(hom) 260325 m6 pr8 no infection.vsi", "size_bytes": 2251944, "sha256": "2cceb77c86cedc7291c59f969de5046dcc08a0e6a70a808730202978efee8d6c"},
+          {"relative_path": "_IFNg ko(hom) 260325 m6 pr8 no infection_/stack1/frame_t.ets", "size_bytes": 36260515, "sha256": "dc4a05433f08da3c6b0fa9cc98999f9aa114acea14bba196bb4a0f06ba9e6e00"},
+          {"relative_path": "_IFNg ko(hom) 260325 m6 pr8 no infection_/stack10000/frame_t.ets", "size_bytes": 37876853, "sha256": "a6305d48606290dfa07ed3532587cf0e0016b08515411190e04ffac793e6ff2d"},
+          {"relative_path": "_IFNg ko(hom) 260325 m6 pr8 no infection_/stack10002/frame_t.ets", "size_bytes": 467768735, "sha256": "bcb139b6c372c6244f2f3e6846aeec7f753aaf7eaa0d02b20125276819a78d8b"},
+          {"relative_path": "_IFNg ko(hom) 260325 m6 pr8 no infection_/stack10005/frame_t.ets", "size_bytes": 461393933, "sha256": "fb978145aa0a022a86f76eb69b231ee0402544dd408369648688eb7d06aa1ed9"}
+        ]
+      },
       "section_ids": ["M6_BF_01", "M6_BF_02"]
     }
   ],

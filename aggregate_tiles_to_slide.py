@@ -64,6 +64,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from pathlib import Path
 from collections import defaultdict
 
@@ -71,7 +72,18 @@ from collections import defaultdict
 # aggregation can never disagree about what is a sum vs a derived quantity.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from aggregate_to_mouse import classify_columns, _num, marker_of
+    from aggregate_to_mouse import (
+        AggregationAuditError,
+        STAGE3_AUDIT_FILENAME,
+        _num,
+        artifact_descriptor,
+        build_aggregation_audit,
+        classify_columns,
+        marker_of,
+        repository_python_code_closure,
+        verify_artifact_descriptor,
+        write_json_atomic,
+    )
 except ImportError:  # pragma: no cover
     sys.exit("ERROR: aggregate_to_mouse.py must sit beside this script "
              "(its column classification is reused so pooling cannot drift).")
@@ -80,7 +92,7 @@ try:
     from ifquant.stage2_index import (
         Stage2IndexError,
         additive_column_marker_ids,
-        declared_marker_ids,
+        canonical_marker_id,
         sha256_file,
         validate_stage2_index,
     )
@@ -92,7 +104,7 @@ CARRY = ["mouse_id", "genotype", "condition", "panel"]
 
 
 def read_csv_rows(path):
-    header, rows, _ = read_csv_rows_snapshot(path)
+    header, rows, _, _ = read_csv_rows_snapshot(path)
     return header, rows
 
 
@@ -103,7 +115,7 @@ def read_csv_rows_snapshot(path):
     text = payload.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if reader.fieldnames is None:
-        return [], [], digest
+        return [], [], digest, len(payload)
     if len(reader.fieldnames) != len(set(reader.fieldnames)):
         raise ValueError(f"{path} contains duplicate CSV header columns")
     rows = []
@@ -116,7 +128,7 @@ def read_csv_rows_snapshot(path):
             raise ValueError(f"{path} row {row_number} contains a non-text CSV value")
         if any((value or "").strip() for value in row.values()):
             rows.append(row)
-    return reader.fieldnames, rows, digest
+    return reader.fieldnames, rows, digest, len(payload)
 
 
 def numeric_integrity_problems(rows, columns, declared_markers_by_panel=None):
@@ -198,6 +210,12 @@ def numeric_integrity_problems(rows, columns, declared_markers_by_panel=None):
                     problems.append(
                         f"region_area_um2{context} must be positive for every row; "
                         f"found {len(nonpositive)} non-positive value(s)")
+            else:
+                negative = [value for value in numeric if value < 0]
+                if negative:
+                    problems.append(
+                        f"additive column {column!r}{context} must be non-negative; "
+                        f"found {len(negative)} negative value(s)")
     return problems
 
 
@@ -209,7 +227,11 @@ def find_run_summaries_legacy(slide_dir):
 
 def load_stage1_manifest(path):
     payload = Path(path).read_bytes()
-    return json.loads(payload.decode("utf-8-sig")), hashlib.sha256(payload).hexdigest()
+    return (
+        json.loads(payload.decode("utf-8-sig")),
+        hashlib.sha256(payload).hexdigest(),
+        len(payload),
+    )
 
 
 def read_stage2_manifests(analysis_dirs):
@@ -222,24 +244,27 @@ def read_stage2_manifests(analysis_dirs):
     and run_summary.csv alone cannot tell you a tile is missing -- the row is
     simply absent. Reading the manifest turns that into a precise reason.
     """
-    total_fail, reasons, statuses = 0, [], []
+    total_fail, reasons, statuses, snapshots = 0, [], [], []
     for d in analysis_dirs:
         p = os.path.join(d, "run_manifest.json")
         if not os.path.isfile(p):
             continue
         try:
-            with open(p, encoding="utf-8") as fh:
-                man = json.load(fh)
+            payload = Path(p).read_bytes()
+            man = json.loads(payload.decode("utf-8-sig"))
         except Exception as exc:                       # noqa: BLE001
             reasons.append(f"{p}: unreadable ({exc})")
             continue
+        snapshots.append(
+            (p, hashlib.sha256(payload).hexdigest(), len(payload))
+        )
         statuses.append(str(man.get("status", "unknown")))
         total_fail += int(man.get("failure_count", 0) or 0)
         for img in (man.get("images") or []):
             err = img.get("error")
             if err:
                 reasons.append(f"{img.get('image', '<unknown>')}: {err}")
-    return total_fail, reasons, statuses
+    return total_fail, reasons, statuses, snapshots
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +286,7 @@ def collect_cell_centroids(analysis_dirs, manifest_by_section):
     out = []
     missing_cells = 0
     paths = []
+    snapshots = []
     for d in analysis_dirs:
         # A declared Stage 2 output writes cells one directory below its analysis
         # root. Never recurse into abandoned retries nested beneath that root.
@@ -280,13 +306,14 @@ def collect_cell_centroids(analysis_dirs, manifest_by_section):
         px = float(tm["pixel_size_um"])
         ox = float(tm["export_x"]) * px
         oy = float(tm["export_y"]) * px
-        _, rows = read_csv_rows(cells_path)
+        _, rows, digest, size_bytes = read_csv_rows_snapshot(cells_path)
+        snapshots.append((cells_path, digest, size_bytes))
         for r in rows:
             cx, cy = _num(r.get("centroid_x_um")), _num(r.get("centroid_y_um"))
             if cx is None or cy is None:
                 continue
             out.append((cx + ox, cy + oy, section))
-    return out, missing_cells
+    return out, missing_cells, snapshots
 
 
 def estimate_seam_duplicates(centroids, merge_dist_um):
@@ -410,11 +437,27 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
     provenance = stage2_provenance or {}
     rec["stage2_source_mode"] = provenance.get("stage2_source_mode", "unknown")
     rec["stage2_index_sha256"] = provenance.get("stage2_index_sha256", "")
+    rec["stage2_index_schema_version"] = provenance.get(
+        "stage2_index_schema_version", "")
     rec["stage1_manifest_sha256"] = provenance.get("stage1_manifest_sha256", "")
+    rec["stage1_profile_sha256"] = provenance.get("stage1_profile_sha256", "")
+    rec["stage1_script_sha256"] = provenance.get("stage1_script_sha256", "")
+    rec["stage1_source_metadata_sha256"] = provenance.get(
+        "stage1_source_metadata_sha256", "")
+    rec["source_package_sha256"] = provenance.get(
+        "source_package_sha256", "")
+    rec["tile_candidate_manifest_sha256"] = provenance.get(
+        "tile_candidate_manifest_sha256", "")
     rec["tile_manifest_sha256"] = provenance.get("tile_manifest_sha256", "")
     rec["stage2_script_sha256"] = provenance.get("stage2_script_sha256", "")
     rec["resolved_config_sha256"] = provenance.get("resolved_config_sha256", "")
+    rec["configuration_artifact_set_sha256"] = provenance.get(
+        "configuration_artifact_set_sha256", "")
+    rec["runtime_profile_sha256"] = provenance.get("runtime_profile_sha256", "")
+    rec["parameter_set_sha256"] = provenance.get("parameter_set_sha256", "")
     rec["measurement_profile_sha256"] = provenance.get("measurement_profile_sha256", "")
+    rec["declared_channel_map_sha256"] = provenance.get(
+        "declared_channel_map_sha256", "")
     rec["ordered_channel_signature"] = provenance.get("ordered_channel_signature", "")
     rec["channel_signature_authority"] = provenance.get(
         "channel_signature_authority", "unverified")
@@ -552,9 +595,15 @@ def aggregate_slide(slide_name, manifest_rows, header, tile_rows, stage1_slide,
 
 
 def write_csv(path, rows):
-    temporary = path + ".tmp"
+    path = os.path.abspath(path)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=os.path.dirname(path),
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+    )
     try:
-        with open(temporary, "w", newline="", encoding="utf-8") as fh:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as fh:
+            descriptor = -1
             if rows:
                 cols = []
                 for r in rows:
@@ -565,10 +614,16 @@ def write_csv(path, rows):
                 w.writeheader()
                 for r in rows:
                     w.writerow(r)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temporary, path)
     finally:
-        if os.path.exists(temporary):
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
             os.remove(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def quarantine_if_exists(path):
@@ -617,6 +672,29 @@ def main():
     outdir = args.outdir or os.path.join(root, "stats")
     os.makedirs(outdir, exist_ok=True)
     out_path = os.path.join(outdir, "slide_level_summary.csv")
+    audit_path = os.path.join(outdir, STAGE3_AUDIT_FILENAME)
+    for prior in (out_path, audit_path):
+        stale = quarantine_if_exists(prior)
+        if stale:
+            print(f"Quarantined prior Stage 3 publication artifact -> {stale}")
+
+    stage3_script_path = os.path.abspath(__file__)
+    aggregation_library_path = os.path.join(
+        os.path.dirname(stage3_script_path), "aggregate_to_mouse.py"
+    )
+    try:
+        code_artifacts, tracked_snapshots = repository_python_code_closure(
+            [
+                ("stage3_aggregator", stage3_script_path),
+                ("aggregation_library", aggregation_library_path),
+            ],
+            audit_path,
+        )
+    except (OSError, AggregationAuditError, ValueError) as exc:
+        sys.exit(f"ERROR: Stage 3 code-provenance closure failed: {exc}")
+    input_artifacts = []
+    validated_index_checks = []
+
     manifest_path = args.stage1_manifest or os.path.join(root, "stage1_manifest.json")
     if not os.path.isfile(manifest_path):
         stale = quarantine_if_exists(out_path)
@@ -624,7 +702,9 @@ def main():
             print(f"Quarantined stale analytical output -> {stale}")
         sys.exit(f"ERROR: Stage 1 manifest is required: {manifest_path}")
     try:
-        stage1, stage1_snapshot_sha256 = load_stage1_manifest(manifest_path)
+        stage1, stage1_snapshot_sha256, stage1_snapshot_size = (
+            load_stage1_manifest(manifest_path)
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         stale = quarantine_if_exists(out_path)
         if stale:
@@ -656,12 +736,26 @@ def main():
     stage1_by_stem = {
         stem: slide for stem, slide in zip(declared_stems, stage1_slides)
     }
+    stage1_descriptor = artifact_descriptor(
+        manifest_path,
+        "stage1_manifest",
+        audit_path,
+        digest=stage1_snapshot_sha256,
+        size_bytes=stage1_snapshot_size,
+    )
+    input_artifacts.append(stage1_descriptor)
+    tracked_snapshots.append((stage1_descriptor, os.path.abspath(manifest_path)))
     stage2_script = os.path.abspath(args.stage2_script)
     if not os.path.isfile(stage2_script):
         stale = quarantine_if_exists(out_path)
         if stale:
             print(f"Quarantined stale analytical output -> {stale}")
         sys.exit(f"ERROR: --stage2-script not found: {stage2_script}")
+    stage2_script_descriptor = artifact_descriptor(
+        stage2_script, "stage2_engine", audit_path
+    )
+    input_artifacts.append(stage2_script_descriptor)
+    tracked_snapshots.append((stage2_script_descriptor, stage2_script))
     if args.allow_incomplete:
         print("WARNING: --allow-incomplete is deprecated. Failed rows are written only to "
               "slide_level_summary.REJECTED.csv and never to the analytical filename.")
@@ -688,7 +782,12 @@ def main():
         if not os.path.isfile(tm_path):
             continue
         try:
-            manifest_header, manifest_rows, manifest_snapshot_sha256 = (
+            (
+                manifest_header,
+                manifest_rows,
+                manifest_snapshot_sha256,
+                manifest_snapshot_size,
+            ) = (
                 read_csv_rows_snapshot(tm_path)
             )
         except (OSError, UnicodeError, csv.Error, ValueError) as exc:
@@ -696,6 +795,17 @@ def main():
             print("ERROR: " + msg)
             all_problems.append(msg)
             continue
+        tile_manifest_descriptor = artifact_descriptor(
+            tm_path,
+            f"tile_manifest:{entry}",
+            audit_path,
+            digest=manifest_snapshot_sha256,
+            size_bytes=manifest_snapshot_size,
+        )
+        input_artifacts.append(tile_manifest_descriptor)
+        tracked_snapshots.append(
+            (tile_manifest_descriptor, os.path.abspath(tm_path))
+        )
         if "section_id" not in manifest_header:
             msg = f"{entry}: tile_manifest.csv is missing required section_id"
             print("ERROR: " + msg)
@@ -742,6 +852,23 @@ def main():
             summaries = [str(path) for path in validated_index.summary_paths]
             analysis_dirs = [str(path) for path in validated_index.analysis_dirs]
             index_document = validated_index.document
+            index_descriptor = artifact_descriptor(
+                index_path,
+                f"stage2_index:{entry}",
+                audit_path,
+            )
+            input_artifacts.append(index_descriptor)
+            tracked_snapshots.append(
+                (index_descriptor, os.path.abspath(index_path))
+            )
+            validated_index_checks.append(
+                (
+                    index_path,
+                    slide_dir,
+                    index_document["index_sha256"],
+                    index_descriptor["sha256"],
+                )
+            )
             if stage1_snapshot_sha256 != index_document["stage1_manifest_sha256"]:
                 msg = (
                     f"{entry}: loaded Stage 1 manifest byte snapshot does not match "
@@ -763,22 +890,44 @@ def main():
                 for item in index_document["declared_channel_signatures"])
             declared_markers_by_panel = {
                 item["panel"]: {
-                    marker
-                    for marker in declared_marker_ids(item["signature"])
-                    if marker != "DAPI"
+                    canonical_marker_id(channel["marker"])
+                    for channel in item["channels"]
+                    if channel["role"].lower() != "nuclear"
                 }
-                for item in index_document["declared_channel_signatures"]
+                for item in index_document["declared_channel_maps"]
             }
             stage2_provenance = {
                 "stage2_source_mode": "explicit_hashed_index",
                 "stage2_index_sha256": index_document["index_sha256"],
+                "stage2_index_schema_version": index_document["schema_version"],
                 "stage1_manifest_sha256": index_document["stage1_manifest_sha256"],
+                "stage1_profile_sha256": index_document["stage1_profile_sha256"],
+                "stage1_script_sha256": index_document["stage1_script"]["sha256"],
+                "stage1_source_metadata_sha256": index_document[
+                    "stage1_source_metadata_sha256"
+                ],
+                "source_package_sha256": index_document[
+                    "stage1_source_metadata"
+                ]["source_package_sha256"],
+                "tile_candidate_manifest_sha256": index_document[
+                    "tile_candidate_manifest"
+                ]["sha256"],
                 "tile_manifest_sha256": index_document["tile_manifest"]["sha256"],
                 "stage2_script_sha256": index_document["stage2_script"]["sha256"],
                 "resolved_config_sha256": index_document["resolved_config_sha256"],
+                "configuration_artifact_set_sha256": index_document[
+                    "configuration_artifact_set_sha256"
+                ],
+                "runtime_profile_sha256": index_document["runtime_profile_sha256"],
+                "parameter_set_sha256": index_document["parameter_set_sha256"],
                 "measurement_profile_sha256": index_document["measurement_profile_sha256"],
+                "declared_channel_map_sha256": index_document[
+                    "declared_channel_map_sha256"
+                ],
                 "ordered_channel_signature": signatures,
-                "channel_signature_authority": "declared_panel_mapping_not_source_verified",
+                "channel_signature_authority": index_document[
+                    "channel_mapping_authority"
+                ],
             }
         if not summaries:
             msg = (f"{entry}: no non-empty run_summary.csv found in the selected source. "
@@ -795,14 +944,25 @@ def main():
                 for run in index_document["runs"]
             }
         header, tile_rows = [], []
-        for s in summaries:
+        for summary_number, s in enumerate(summaries, start=1):
             try:
-                h, rws, snapshot_sha256 = read_csv_rows_snapshot(s)
+                h, rws, snapshot_sha256, snapshot_size = read_csv_rows_snapshot(s)
             except (OSError, UnicodeError, csv.Error, ValueError) as exc:
                 integrity_problems.append(
                     f"run_summary.csv is unreadable or malformed: {s}: {exc}"
                 )
                 continue
+            summary_descriptor = artifact_descriptor(
+                s,
+                f"stage2_run_summary:{entry}:{summary_number:04d}",
+                audit_path,
+                digest=snapshot_sha256,
+                size_bytes=snapshot_size,
+            )
+            input_artifacts.append(summary_descriptor)
+            tracked_snapshots.append(
+                (summary_descriptor, os.path.abspath(s))
+            )
             if expected_summary_hashes:
                 expected_sha256 = expected_summary_hashes.get(str(Path(s).resolve()))
                 if snapshot_sha256 != expected_sha256:
@@ -817,7 +977,23 @@ def main():
         print(f"{entry}: {len(manifest_rows)} tiles expected, {len(tile_rows)} run_summary rows "
               f"from {len(summaries)} Stage 2 output folder(s)")
 
-        stage2_failures, stage2_reasons, stage2_statuses = read_stage2_manifests(analysis_dirs)
+        (
+            stage2_failures,
+            stage2_reasons,
+            stage2_statuses,
+            stage2_manifest_snapshots,
+        ) = read_stage2_manifests(analysis_dirs)
+        for manifest_number, (path, digest, size_bytes) in enumerate(
+                stage2_manifest_snapshots, start=1):
+            descriptor = artifact_descriptor(
+                path,
+                f"stage2_run_manifest:{entry}:{manifest_number:04d}",
+                audit_path,
+                digest=digest,
+                size_bytes=size_bytes,
+            )
+            input_artifacts.append(descriptor)
+            tracked_snapshots.append((descriptor, os.path.abspath(path)))
         if stage2_failures:
             print(f"  Stage 2 reported {stage2_failures} per-image failure(s); "
                   f"status={','.join(sorted(set(stage2_statuses))) or 'unknown'}")
@@ -826,12 +1002,25 @@ def main():
         if args.seam_counts == "report":
             try:
                 by_section = {r["section_id"]: r for r in manifest_rows}
-                centroids, unmatched = collect_cell_centroids(analysis_dirs, by_section)
+                centroids, unmatched, cell_snapshots = collect_cell_centroids(
+                    analysis_dirs, by_section
+                )
             except (KeyError, OSError, UnicodeError, csv.Error, ValueError) as exc:
                 integrity_problems.append(
                     f"cell-centroid seam diagnostics are unreadable or malformed: {exc}"
                 )
-                centroids, unmatched = [], 0
+                centroids, unmatched, cell_snapshots = [], 0, []
+            for cell_number, (path, digest, size_bytes) in enumerate(
+                    cell_snapshots, start=1):
+                descriptor = artifact_descriptor(
+                    path,
+                    f"stage2_cells:{entry}:{cell_number:06d}",
+                    audit_path,
+                    digest=digest,
+                    size_bytes=size_bytes,
+                )
+                input_artifacts.append(descriptor)
+                tracked_snapshots.append((descriptor, os.path.abspath(path)))
             if unmatched:
                 print(f"  note: {unmatched} __cells.csv file(s) could not be matched to a tile")
             seam_dup, n_cells = estimate_seam_duplicates(centroids, args.seam_merge_um)
@@ -883,9 +1072,76 @@ def main():
     stale_rejected = quarantine_if_exists(rejected_path)
     if stale_rejected:
         print(f"Quarantined stale rejected diagnostic -> {stale_rejected}")
-    write_csv(out_path, slide_rows)
+    try:
+        # The Stage 2 index validator follows and re-hashes the complete
+        # transitive provenance graph (manifests, configuration, parameters,
+        # runtime profile, tiles, ROIs and summaries). Re-run it immediately
+        # before publication, then verify every direct byte snapshot parsed by
+        # this process.
+        for (
+                index_path,
+                slide_dir,
+                expected_canonical_index_sha256,
+                expected_index_byte_sha256,
+        ) in validated_index_checks:
+            checked = validate_stage2_index(
+                Path(index_path),
+                slide_dir=Path(slide_dir),
+                stage1_manifest=Path(manifest_path),
+                stage2_script=Path(stage2_script),
+            )
+            if (
+                    checked.document["index_sha256"]
+                    != expected_canonical_index_sha256
+            ):
+                raise AggregationAuditError(
+                    "Stage 2 index canonical content drifted before Stage 3 "
+                    f"publication: {index_path}"
+                )
+            if sha256_file(Path(index_path)) != expected_index_byte_sha256:
+                raise AggregationAuditError(
+                    "Stage 2 index bytes drifted before Stage 3 publication: "
+                    f"{index_path}"
+                )
+        for descriptor, source_path in tracked_snapshots:
+            verify_artifact_descriptor(descriptor, source_path)
+
+        write_csv(out_path, slide_rows)
+
+        # Recheck direct inputs after the atomic CSV replace so the audit never
+        # seals an output computed while an input changed mid-publication.
+        for descriptor, source_path in tracked_snapshots:
+            verify_artifact_descriptor(descriptor, source_path)
+        output_artifacts = [
+            artifact_descriptor(
+                out_path, "stage3_slide_summary", audit_path
+            )
+        ]
+        audit = build_aggregation_audit(
+            stage="stage3_slide_aggregation",
+            arguments={
+                "stage2_index_name": args.stage2_index_name,
+                "seam_merge_um": args.seam_merge_um,
+                "seam_counts": args.seam_counts,
+                "allow_incomplete": bool(args.allow_incomplete),
+                "legacy_recursive_discovery": bool(
+                    args.legacy_recursive_discovery
+                ),
+                "declared_slide_count": len(stage1_slides),
+            },
+            code_artifacts=code_artifacts,
+            input_artifacts=input_artifacts,
+            output_artifacts=output_artifacts,
+        )
+        # The audit is deliberately the final member published in the set.
+        write_json_atomic(audit_path, audit)
+    except (OSError, Stage2IndexError, AggregationAuditError, ValueError) as exc:
+        for partial in (out_path, audit_path):
+            quarantine_if_exists(partial)
+        sys.exit(f"ERROR: Stage 3 publication failed closed: {exc}")
     print("")
     print(f"Wrote {len(slide_rows)} slide row(s) -> {out_path}")
+    print(f"Wrote content-addressed aggregation audit last -> {audit_path}")
     print("Next:  python3 aggregate_to_mouse.py " + out_path)
     print("Reminder: n = MICE. With one slide per mouse, n equals the number of slides, "
           "not the number of tiles.")

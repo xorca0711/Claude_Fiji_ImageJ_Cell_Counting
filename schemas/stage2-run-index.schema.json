@@ -13,12 +13,30 @@
     "generated_utc",
     "slide_id",
     "stage1_manifest_sha256",
+    "stage1_script",
+    "stage1_profile_sha256",
+    "stage1_source_metadata",
+    "stage1_source_metadata_sha256",
+    "tile_candidate_manifest",
     "tile_manifest",
     "stage2_script",
     "resolved_config_sha256",
+    "configuration_artifacts",
+    "configuration_artifact_set_sha256",
+    "runtime_profile",
+    "runtime_profile_sha256",
+    "segmentation_profile",
+    "segmentation_profile_sha256",
+    "stardist_label_outputs",
+    "stardist_label_output_set_sha256",
+    "parameter_artifacts",
+    "parameter_set_sha256",
     "measurement_profile_sha256",
     "analytical_identity",
+    "channel_mapping_authority",
     "declared_channel_signatures",
+    "declared_channel_maps",
+    "declared_channel_map_sha256",
     "tile_inputs",
     "runs",
     "coverage",
@@ -29,7 +47,7 @@
       "const": "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json"
     },
     "schema_version": {
-      "const": "1.0.0"
+      "const": "1.3.0"
     },
     "index_type": {
       "const": "ifquant_wsi_stage2_run_index"
@@ -48,6 +66,21 @@
     "stage1_manifest_sha256": {
       "$ref": "#/$defs/sha256"
     },
+    "stage1_script": {
+      "$ref": "#/$defs/stage1Script"
+    },
+    "stage1_profile_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stage1_source_metadata": {
+      "$ref": "#/$defs/stage1SourceMetadata"
+    },
+    "stage1_source_metadata_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "tile_candidate_manifest": {
+      "$ref": "#/$defs/tileCandidateManifestArtifact"
+    },
     "tile_manifest": {
       "$ref": "#/$defs/tileManifestArtifact"
     },
@@ -63,16 +96,61 @@
     "resolved_config_sha256": {
       "$ref": "#/$defs/sha256"
     },
+    "configuration_artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/configurationArtifact" }
+    },
+    "configuration_artifact_set_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "runtime_profile": {
+      "$ref": "#/$defs/runtimeProfile"
+    },
+    "runtime_profile_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "segmentation_profile": {
+      "$ref": "#/$defs/segmentationProfile"
+    },
+    "segmentation_profile_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stardist_label_outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stardistLabelOutput" }
+    },
+    "stardist_label_output_set_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "parameter_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/parameterArtifact" }
+    },
+    "parameter_set_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "measurement_profile_sha256": {
       "$ref": "#/$defs/sha256"
     },
     "analytical_identity": {
       "const": "section_id|region|panel"
     },
+    "channel_mapping_authority": {
+      "const": "declared_panel_mapping_not_source_verified"
+    },
     "declared_channel_signatures": {
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/channelSignature" }
+    },
+    "declared_channel_maps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/declaredChannelMap" }
+    },
+    "declared_channel_map_sha256": {
+      "$ref": "#/$defs/sha256"
     },
     "tile_inputs": {
       "type": "array",
@@ -91,6 +169,29 @@
       "$ref": "#/$defs/sha256"
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "segmentation_profile": {
+            "properties": { "segmenter": { "const": "classic" } },
+            "required": ["segmenter"]
+          }
+        },
+        "required": ["segmentation_profile"]
+      },
+      "then": {
+        "properties": {
+          "stardist_label_outputs": { "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "stardist_label_outputs": { "minItems": 1 }
+        }
+      }
+    }
+  ],
   "$defs": {
     "nonEmptyString": {
       "type": "string",
@@ -103,12 +204,148 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*\\/$)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)(?!.*[\\t\\r\\n])(?!\\s).*\\S$"
     },
     "fileName": {
       "type": "string",
       "minLength": 1,
       "pattern": "^[^/\\\\:]+$"
+    },
+    "stage1Script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size_bytes", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/fileName" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "contentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size_bytes", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/fileName" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "publishedContentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["published_relative_path", "content"],
+      "properties": {
+        "published_relative_path": { "$ref": "#/$defs/relativePath" },
+        "content": { "$ref": "#/$defs/contentIdentity" }
+      }
+    },
+    "portableContentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "content": { "$ref": "#/$defs/contentIdentity" }
+      }
+    },
+    "profileSourceArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_relative_path", "published_relative_path", "content"],
+      "properties": {
+        "profile_relative_path": { "$ref": "#/$defs/relativePath" },
+        "published_relative_path": { "$ref": "#/$defs/relativePath" },
+        "content": { "$ref": "#/$defs/contentIdentity" }
+      }
+    },
+    "referenceSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "authority",
+        "profile_id",
+        "review_state",
+        "review_protocol_id",
+        "coordinate_space",
+        "mask_logic",
+        "sampling_semantics",
+        "airway_excluded",
+        "downsample",
+        "mask_width",
+        "mask_height",
+        "analysis_tissue_foreground_px",
+        "tissue_mask",
+        "content_verified_before_and_after"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["automatic_dapi_otsu_engineering", "external_binary_reference_masks"]
+        },
+        "authority": { "$ref": "#/$defs/nonEmptyString" },
+        "profile_id": { "$ref": "#/$defs/nonEmptyString" },
+        "review_state": {
+          "enum": ["engineering_unreviewed", "expert_reviewed"]
+        },
+        "review_protocol_id": { "$ref": "#/$defs/nonEmptyString" },
+        "coordinate_space": { "const": "selected_series_downsample_grid" },
+        "mask_logic": { "$ref": "#/$defs/nonEmptyString" },
+        "sampling_semantics": { "const": "exhaustive_grid_over_declared_reference_space" },
+        "airway_excluded": { "type": "boolean" },
+        "downsample": { "type": "number", "exclusiveMinimum": 0 },
+        "mask_width": { "type": "integer", "minimum": 1 },
+        "mask_height": { "type": "integer", "minimum": 1 },
+        "analysis_tissue_foreground_px": { "type": "integer", "minimum": 1 },
+        "tissue_mask": { "$ref": "#/$defs/publishedContentArtifact" },
+        "content_verified_before_and_after": { "const": true },
+        "profile_sha256": { "$ref": "#/$defs/sha256" },
+        "reference_mask_profile": { "$ref": "#/$defs/publishedContentArtifact" },
+        "tissue_foreground_px_before_airway_exclusion": { "type": "integer", "minimum": 1 },
+        "airway_foreground_px": { "type": "integer", "minimum": 0 },
+        "source_tissue_mask": { "$ref": "#/$defs/profileSourceArtifact" },
+        "source_airway_mask": { "$ref": "#/$defs/profileSourceArtifact" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "external_binary_reference_masks" } } },
+          "then": {
+            "required": [
+              "profile_sha256",
+              "reference_mask_profile",
+              "tissue_foreground_px_before_airway_exclusion",
+              "airway_foreground_px",
+              "source_tissue_mask",
+              "source_airway_mask"
+            ],
+            "properties": {
+              "authority": { "const": "content_bound_external_profile_and_binary_masks" },
+              "airway_excluded": { "const": true },
+              "mask_logic": { "const": "tissue_foreground_minus_airway_foreground" }
+            }
+          },
+          "else": {
+            "properties": {
+              "authority": { "const": "generated_dapi_otsu_raster_and_content_bound_tile_rois" },
+              "profile_id": { "const": "automatic_dapi_otsu_engineering" },
+              "airway_excluded": { "const": false },
+              "review_state": { "const": "engineering_unreviewed" },
+              "review_protocol_id": { "const": "automatic_dapi_otsu" },
+              "mask_logic": { "const": "dapi_otsu_tissue_without_airway_exclusion" }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["profile_sha256"] },
+                { "required": ["reference_mask_profile"] },
+                { "required": ["tissue_foreground_px_before_airway_exclusion"] },
+                { "required": ["airway_foreground_px"] },
+                { "required": ["source_tissue_mask"] },
+                { "required": ["source_airway_mask"] }
+              ]
+            }
+          }
+        }
+      ]
     },
     "artifact": {
       "type": "object",
@@ -138,6 +375,362 @@
         "sha256": { "$ref": "#/$defs/sha256" },
         "row_count": { "type": "integer", "minimum": 1 },
         "tile_set_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "tileCandidateManifestArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "row_count", "candidate_set_sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "row_count": { "type": "integer", "minimum": 1 },
+        "candidate_set_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stage1SourceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_vsi",
+        "source_package",
+        "source_package_sha256",
+        "stage1_script_sha256",
+        "series_index",
+        "series_name",
+        "width",
+        "height",
+        "pixel_width_um",
+        "pixel_height_um",
+        "n_channels",
+        "expected_channel_count",
+        "channel_names",
+        "ordered_channel_names",
+        "ordered_channel_patterns",
+        "channel_order_authority",
+        "source_metadata_authority",
+        "reference_space"
+      ],
+      "properties": {
+        "source_vsi": { "$ref": "#/$defs/fileName" },
+        "source_package": { "$ref": "#/$defs/sourcePackage" },
+        "source_package_sha256": { "$ref": "#/$defs/sha256" },
+        "stage1_script_sha256": { "$ref": "#/$defs/sha256" },
+        "series_index": { "type": "integer", "minimum": 0 },
+        "series_name": { "$ref": "#/$defs/nonEmptyString" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "pixel_width_um": { "type": "number", "exclusiveMinimum": 0 },
+        "pixel_height_um": { "type": "number", "exclusiveMinimum": 0 },
+        "n_channels": { "type": "integer", "minimum": 1 },
+        "expected_channel_count": { "type": "integer", "minimum": 1 },
+        "channel_names": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "ordered_channel_names": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "ordered_channel_patterns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "channel_order_authority": {
+          "const": "acquisition_order_pattern_only_not_biological_identity"
+        },
+        "source_metadata_authority": {
+          "const": "bioformats_used_files_content_verified_before_and_after_stage1"
+        },
+        "reference_space": { "$ref": "#/$defs/referenceSpace" }
+      }
+    },
+    "sourcePackageMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "size_bytes", "sha256"],
+      "properties": {
+        "relative_path": { "$ref": "#/$defs/relativePath" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sourcePackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "source_vsi",
+        "discovery_authority",
+        "package_hash_algorithm",
+        "members",
+        "package_sha256"
+      ],
+      "properties": {
+        "format": { "const": "olympus_vsi" },
+        "source_vsi": { "$ref": "#/$defs/fileName" },
+        "discovery_authority": {
+          "const": "bioformats_ImageReader_getUsedFiles"
+        },
+        "package_hash_algorithm": {
+          "const": "sha256_utf8_path_tab_size_tab_sha256_lf"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourcePackageMember" }
+        },
+        "package_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "configurationArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "artifact"],
+      "properties": {
+        "role": { "enum": ["marker_registry", "panel_config"] },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "runtimeProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "imagej_version",
+        "bioformats_version",
+        "java_version",
+        "java_vendor",
+        "java_runtime",
+        "java_vm"
+      ],
+      "properties": {
+        "imagej_version": { "$ref": "#/$defs/nonEmptyString" },
+        "bioformats_version": { "$ref": "#/$defs/nonEmptyString" },
+        "java_version": { "$ref": "#/$defs/nonEmptyString" },
+        "java_vendor": { "$ref": "#/$defs/nonEmptyString" },
+        "java_runtime": { "$ref": "#/$defs/nonEmptyString" },
+        "java_vm": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "modelArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archive_format", "entry_count", "file_count"],
+      "properties": {
+        "archive_format": { "const": "zip" },
+        "entry_count": { "type": "integer", "minimum": 1 },
+        "file_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "stardistRuntimeArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "expected_classes", "content"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "expected_classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "content": { "$ref": "#/$defs/contentIdentity" }
+      }
+    },
+    "stardistClassBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class_name", "artifact_role"],
+      "properties": {
+        "class_name": { "$ref": "#/$defs/nonEmptyString" },
+        "artifact_role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      }
+    },
+    "segmentationProfile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["segmenter", "authority"],
+          "properties": {
+            "segmenter": { "const": "classic" },
+            "authority": { "const": "not_applicable_classic" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "segmenter",
+            "authority",
+            "api_command",
+            "model_choice",
+            "model_content",
+            "model_archive",
+            "runtime_manifest_content",
+            "runtime_profile_id",
+            "runtime_artifacts",
+            "class_bindings",
+            "probability_threshold",
+            "nms_threshold",
+            "tiles"
+          ],
+          "properties": {
+            "segmenter": { "const": "stardist" },
+            "authority": {
+              "const": "explicit_model_and_closed_runtime_manifest_content_bound"
+            },
+            "api_command": { "const": "de.csbdresden.stardist.StarDist2D" },
+            "model_choice": { "const": "Model (.zip) from File" },
+            "model_content": { "$ref": "#/$defs/contentIdentity" },
+            "model_archive": { "$ref": "#/$defs/modelArchive" },
+            "runtime_manifest_content": { "$ref": "#/$defs/contentIdentity" },
+            "runtime_profile_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "runtime_artifacts": {
+              "type": "array",
+              "minItems": 4,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/stardistRuntimeArtifact" }
+            },
+            "class_bindings": {
+              "type": "array",
+              "minItems": 4,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/stardistClassBinding" }
+            },
+            "probability_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "nms_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "tiles": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "stardistLabelOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tile_id",
+        "output_key",
+        "region",
+        "command_output",
+        "output_type",
+        "pixel_encoding",
+        "canonical_hash_encoding",
+        "width_pixels",
+        "height_pixels",
+        "label_count",
+        "canonical_pixel_sha256",
+        "artifact"
+      ],
+      "properties": {
+        "tile_id": { "$ref": "#/$defs/nonEmptyString" },
+        "output_key": { "$ref": "#/$defs/fileName" },
+        "region": { "$ref": "#/$defs/nonEmptyString" },
+        "command_output": { "const": "label" },
+        "output_type": { "const": "Label Image" },
+        "pixel_encoding": { "const": "unsigned_16_bit_labels" },
+        "canonical_hash_encoding": {
+          "const": "ifq_stardist_label_u16le_row_major_v1"
+        },
+        "width_pixels": { "type": "integer", "minimum": 1 },
+        "height_pixels": { "type": "integer", "minimum": 1 },
+        "label_count": { "type": "integer", "minimum": 0 },
+        "canonical_pixel_sha256": { "$ref": "#/$defs/sha256" },
+        "artifact": { "$ref": "#/$defs/portableContentArtifact" }
+      }
+    },
+    "routingInputHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "samplesheet_sha256",
+        "panel_map_sha256",
+        "canonical_manifest_sha256"
+      ],
+      "properties": {
+        "samplesheet_sha256": { "$ref": "#/$defs/sha256" },
+        "panel_map_sha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "canonical_manifest_sha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "routingArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "artifact"],
+      "properties": {
+        "role": { "enum": ["panel_map", "canonical_manifest"] },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "parameterArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tile_id",
+        "output_key",
+        "panel",
+        "segmentation_profile_sha256",
+        "params"
+      ],
+      "properties": {
+        "tile_id": { "$ref": "#/$defs/nonEmptyString" },
+        "output_key": { "$ref": "#/$defs/fileName" },
+        "panel": { "$ref": "#/$defs/nonEmptyString" },
+        "segmentation_profile_sha256": { "$ref": "#/$defs/sha256" },
+        "params": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "declaredChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel_index", "file_label", "marker", "role"],
+      "properties": {
+        "channel_index": { "type": "integer", "minimum": 1 },
+        "file_label": { "$ref": "#/$defs/nonEmptyString" },
+        "marker": { "$ref": "#/$defs/nonEmptyString" },
+        "role": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "declaredChannelMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["panel", "channels"],
+      "properties": {
+        "panel": { "$ref": "#/$defs/nonEmptyString" },
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/declaredChannel" }
+        }
       }
     },
     "channelSignature": {
@@ -176,6 +769,8 @@
         "manifest_status",
         "process_exit_code",
         "config_sha256",
+        "routing_input_hashes",
+        "routing_artifacts",
         "input_set_sha256",
         "successful_input_count",
         "failure_count",
@@ -197,6 +792,11 @@
         "manifest_status": { "const": "complete" },
         "process_exit_code": { "const": 0 },
         "config_sha256": { "$ref": "#/$defs/sha256" },
+        "routing_input_hashes": { "$ref": "#/$defs/routingInputHashes" },
+        "routing_artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routingArtifact" }
+        },
         "input_set_sha256": { "$ref": "#/$defs/sha256" },
         "successful_input_count": { "type": "integer", "minimum": 1 },
         "failure_count": { "const": 0 },

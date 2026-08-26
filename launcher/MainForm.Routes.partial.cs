@@ -50,6 +50,8 @@ namespace IFQuantLauncher
         private TextBox wsiInputBox;
         private TextBox wsiOutputBox;
         private TextBox slideMetadataBox;
+        private TextBox referenceMaskProfileBox;
+        private Label referenceMaskStatusLabel;
         private CheckBox wsiResumeBox;
         private CheckBox wsiPartitionBox;
         private NumericUpDown wsiMaxTilesBox;
@@ -172,6 +174,9 @@ namespace IFQuantLauncher
                 inputBox.Text = sandbox;
                 advancedBox.Text = "";
                 panelConfigBox.Text = "";
+                referenceMaskProfileBox.Text = "";
+                starDistModelPathBox.Text = "";
+                starDistRuntimeManifestBox.Text = "";
                 return UiSmokeBody(sandbox);
             }
             finally
@@ -281,6 +286,33 @@ namespace IFQuantLauncher
             routeBox.SelectedIndex = 1;
             if (!toolsGroup.Visible) return 69;
             if (projectionBox.Enabled || maxImagesBox.Enabled || inputBox.Enabled) return 69;
+            if (referenceMaskProfileBox == null || referenceMaskStatusLabel == null ||
+                !referenceMaskProfileBox.Visible || !referenceMaskStatusLabel.Visible ||
+                referenceMaskStatusLabel.Text.IndexOf(
+                    "automatic DAPI/Otsu engineering mask",
+                    StringComparison.OrdinalIgnoreCase) < 0) return 69;
+
+            // Modern StarDist makes both content authorities explicit; classic
+            // and legacy hide the controls and emit neither path.
+            SelectChoice(segmenterBox, "classic");
+            if (starDistAuthorityPanel == null || starDistAuthorityPanel.Visible)
+                return 69;
+            string smokeModel = Path.Combine(sandbox, "smoke-model.zip");
+            string smokeManifest = Path.Combine(sandbox, "stardist-runtime.json");
+            File.WriteAllBytes(smokeModel, new byte[] { 1, 2, 3 });
+            File.WriteAllText(
+                smokeManifest,
+                "{\"schema_version\":\"1.0.0\",\"profile_id\":\"smoke\"," +
+                "\"artifacts\":[{},{},{},{}]}",
+                new UTF8Encoding(false));
+            starDistModelPathBox.Text = smokeModel;
+            starDistRuntimeManifestBox.Text = smokeManifest;
+            SelectChoice(segmenterBox, "stardist");
+            if (!starDistAuthorityPanel.Visible ||
+                starDistAuthorityStatusLabel.Text.IndexOf(
+                    "does not validate scientific suitability",
+                    StringComparison.OrdinalIgnoreCase) < 0) return 69;
+            SelectChoice(segmenterBox, "classic");
 
             // Route 1 with an explicit panel must build a threshold row per
             // analysis channel, each naming the engine's own variable.
@@ -671,7 +703,19 @@ namespace IFQuantLauncher
             wsiInputBox = AddBrowseRow(table, 1, "Slide (.vsi) file or folder", false);
             wsiOutputBox = AddBrowseRow(table, 2, "Stage 1 output root", true);
             slideMetadataBox = AddBrowseRow(table, 3, "Slide metadata CSV", false);
-            pythonBox = AddBrowseRow(table, 4, "Python executable", false);
+            referenceMaskProfileBox = AddBrowseRow(
+                table, 4, "Reference-mask profile JSON (optional)", false, true);
+
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            referenceMaskStatusLabel = new Label();
+            referenceMaskStatusLabel.AutoSize = true;
+            referenceMaskStatusLabel.Dock = DockStyle.Fill;
+            referenceMaskStatusLabel.Padding = new Padding(0, 2, 0, 6);
+            table.Controls.Add(referenceMaskStatusLabel, 1, 5);
+            table.SetColumnSpan(referenceMaskStatusLabel, 2);
+            UpdateReferenceMaskStatus();
+
+            pythonBox = AddBrowseRow(table, 6, "Python executable", false);
 
             toolTips.SetToolTip(quPathBox,
                 "The CONSOLE build. The windowed QuPath detaches immediately, so the launcher " +
@@ -685,28 +729,36 @@ namespace IFQuantLauncher
             toolTips.SetToolTip(slideMetadataBox,
                 "vsi_filename,mouse_id,genotype,condition. Without it the mouse-level " +
                 "aggregation has to be assembled by hand afterwards.");
+            toolTips.SetToolTip(referenceMaskProfileBox,
+                "Optional reviewed JSON profile that declares exact external tissue and " +
+                "airway mask bytes. Blank deliberately uses the automatic DAPI/Otsu " +
+                "engineering mask, for which airway exclusion is not available.");
 
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             wsiResumeBox = new CheckBox();
-            wsiResumeBox.Text = "Resume an existing stage 1 root instead of starting over";
-            wsiResumeBox.Checked = true;
+            wsiResumeBox.Text = "Resume unavailable until Stage 1 checkpoints are content-addressed";
+            wsiResumeBox.Checked = false;
+            wsiResumeBox.Enabled = false;
             wsiResumeBox.AutoSize = true;
-            table.Controls.Add(wsiResumeBox, 1, 5);
+            toolTips.SetToolTip(wsiResumeBox,
+                "Use a new Stage 1 output root. Existing tiles are not yet bound to the " +
+                "source slide, script, tissue mask, configuration and ROI bytes.");
+            table.Controls.Add(wsiResumeBox, 1, 7);
 
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             wsiPartitionBox = new CheckBox();
             wsiPartitionBox.Text = "Partition tissue into damaged / intact ROIs during tiling";
             wsiPartitionBox.AutoSize = true;
-            table.Controls.Add(wsiPartitionBox, 1, 6);
+            table.Controls.Add(wsiPartitionBox, 1, 8);
 
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            table.Controls.Add(MakeLabel("Tile cap per slide (0 = all)"), 0, 7);
+            table.Controls.Add(MakeLabel("Tile cap per slide (0 = all)"), 0, 9);
             wsiMaxTilesBox = new NumericUpDown();
             wsiMaxTilesBox.Minimum = 0;
             wsiMaxTilesBox.Maximum = 1000000;
             wsiMaxTilesBox.Value = 0;
             wsiMaxTilesBox.Dock = DockStyle.Fill;
-            table.Controls.Add(wsiMaxTilesBox, 1, 7);
+            table.Controls.Add(wsiMaxTilesBox, 1, 9);
             toolTips.SetToolTip(wsiMaxTilesBox,
                 "A cap makes stage 1 record coverage as incomplete, which makes stage 3 refuse " +
                 "to write a slide summary. That is intended: a partially tiled slide has no " +
@@ -714,13 +766,106 @@ namespace IFQuantLauncher
 
             wsiOnlyRows = new Control[]
             {
-                quPathBox, wsiInputBox, wsiOutputBox, slideMetadataBox, pythonBox,
+                quPathBox, wsiInputBox, wsiOutputBox, slideMetadataBox,
+                referenceMaskProfileBox, referenceMaskStatusLabel, pythonBox,
                 wsiResumeBox, wsiPartitionBox, wsiMaxTilesBox
             };
             fijiOnlyRows = new Control[0];
         }
 
-        private TextBox AddBrowseRow(TableLayoutPanel table, int row, string label, bool folder)
+        private TableLayoutPanel BuildStarDistAuthorityPanel()
+        {
+            TableLayoutPanel panel = new TableLayoutPanel();
+            panel.Dock = DockStyle.Top;
+            panel.AutoSize = true;
+            panel.ColumnCount = 3;
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaledF(155F)));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaledF(95F)));
+            panel.Padding = new Padding(0, 2, 0, 4);
+
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            panel.Controls.Add(MakeLabel("Exported model (.zip)"), 0, 0);
+            starDistModelPathBox = new TextBox();
+            starDistModelPathBox.Dock = DockStyle.Fill;
+            panel.Controls.Add(starDistModelPathBox, 1, 0);
+            Button modelBrowse = new Button();
+            modelBrowse.Text = "Browse...";
+            modelBrowse.Dock = DockStyle.Fill;
+            modelBrowse.Click += delegate
+            {
+                BrowseFilteredFile(
+                    starDistModelPathBox,
+                    "Select the exported StarDist model",
+                    "StarDist exported model (*.zip)|*.zip|All files (*.*)|*.*");
+            };
+            panel.Controls.Add(modelBrowse, 2, 0);
+
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            panel.Controls.Add(MakeLabel("Runtime manifest (.json)"), 0, 1);
+            starDistRuntimeManifestBox = new TextBox();
+            starDistRuntimeManifestBox.Dock = DockStyle.Fill;
+            panel.Controls.Add(starDistRuntimeManifestBox, 1, 1);
+            Button manifestBrowse = new Button();
+            manifestBrowse.Text = "Browse...";
+            manifestBrowse.Dock = DockStyle.Fill;
+            manifestBrowse.Click += delegate
+            {
+                BrowseFilteredFile(
+                    starDistRuntimeManifestBox,
+                    "Select the StarDist runtime manifest",
+                    "JSON runtime manifest (*.json)|*.json|All files (*.*)|*.*");
+            };
+            panel.Controls.Add(manifestBrowse, 2, 1);
+
+            panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            starDistAuthorityStatusLabel = new Label();
+            starDistAuthorityStatusLabel.AutoSize = true;
+            starDistAuthorityStatusLabel.Dock = DockStyle.Fill;
+            starDistAuthorityStatusLabel.Padding = new Padding(0, 2, 0, 2);
+            panel.Controls.Add(starDistAuthorityStatusLabel, 1, 2);
+            panel.SetColumnSpan(starDistAuthorityStatusLabel, 2);
+
+            toolTips.SetToolTip(starDistModelPathBox,
+                "Required only for StarDist. Select the exact exported .zip model whose " +
+                "bytes the engine must bind into the run manifest.");
+            toolTips.SetToolTip(starDistRuntimeManifestBox,
+                "Required only for StarDist. This closed JSON manifest identifies the exact " +
+                "StarDist, CSBDeep and TensorFlow runtime artifacts Fiji must have loaded.");
+
+            starDistModelPathBox.TextChanged += delegate
+            {
+                UpdateStarDistAuthorityStatus();
+                RefreshGateSummary();
+            };
+            starDistRuntimeManifestBox.TextChanged += delegate
+            {
+                UpdateStarDistAuthorityStatus();
+                RefreshGateSummary();
+            };
+            panel.Visible = false;
+            UpdateStarDistAuthorityStatus();
+            return panel;
+        }
+
+        private void BrowseFilteredFile(TextBox target, string title, string filter)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = title;
+                dialog.Filter = filter;
+                dialog.CheckFileExists = true;
+                string current = (target.Text ?? "").Trim();
+                if (File.Exists(current)) dialog.FileName = current;
+                else if (Directory.Exists(current)) dialog.InitialDirectory = current;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                    target.Text = dialog.FileName;
+            }
+        }
+
+        private TextBox AddBrowseRow(
+            TableLayoutPanel table, int row, string label, bool folder,
+            bool jsonFile = false)
         {
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             table.Controls.Add(MakeLabel(label), 0, row);
@@ -734,6 +879,7 @@ namespace IFQuantLauncher
             browse.Click += delegate
             {
                 if (pickFolder) BrowseFolder(box);
+                else if (jsonFile) BrowseJsonFile(box);
                 else BrowseAnyFile(box);
             };
             table.Controls.Add(browse, 2, row);
@@ -754,6 +900,305 @@ namespace IFQuantLauncher
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                     target.Text = dialog.FileName;
             }
+        }
+
+        private void UpdateReferenceMaskStatus()
+        {
+            if (referenceMaskStatusLabel == null || referenceMaskProfileBox == null)
+                return;
+            string raw = (referenceMaskProfileBox.Text ?? "").Trim();
+            if (raw.Length == 0)
+            {
+                referenceMaskStatusLabel.Text =
+                    "Reference space: automatic DAPI/Otsu engineering mask; airway " +
+                    "exclusion is not available. This is an engineering mask, not an " +
+                    "independently validated anatomical reference.";
+                referenceMaskStatusLabel.ForeColor = Color.DarkOrange;
+                return;
+            }
+
+            try
+            {
+                string path = NormalizeOptionalReferenceMaskProfile(raw);
+                referenceMaskStatusLabel.Text =
+                    "Reference space: external profile " + Path.GetFileName(path) +
+                    ". The launcher checks only a regular JSON object; Stage 1 validates " +
+                    "the profile contract, slide identity, and exact profile/mask bytes. " +
+                    "Selection alone does not establish biological validity.";
+                referenceMaskStatusLabel.ForeColor = Color.FromArgb(25, 80, 145);
+            }
+            catch (Exception ex)
+            {
+                referenceMaskStatusLabel.Text =
+                    "Reference-mask profile is not launchable: " + ex.Message;
+                referenceMaskStatusLabel.ForeColor = Color.DarkRed;
+            }
+        }
+
+        private void UpdateStarDistAuthorityVisibility()
+        {
+            if (starDistAuthorityPanel == null || segmenterBox == null) return;
+            bool modernRoute = routeBox == null ||
+                SelectedRoute != ImageRoute.LegacyFiji172;
+            bool selected = string.Equals(
+                ChoiceKey(segmenterBox), "stardist",
+                StringComparison.OrdinalIgnoreCase);
+            starDistAuthorityPanel.Visible = modernRoute && selected;
+            UpdateStarDistAuthorityStatus();
+        }
+
+        private void UpdateStarDistAuthorityStatus()
+        {
+            if (starDistAuthorityStatusLabel == null ||
+                starDistModelPathBox == null ||
+                starDistRuntimeManifestBox == null)
+                return;
+            if (!string.Equals(
+                    ChoiceKey(segmenterBox), "stardist",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                starDistAuthorityStatusLabel.Text =
+                    "Classic segmentation selected; StarDist artifact paths are not emitted.";
+                starDistAuthorityStatusLabel.ForeColor = Color.FromArgb(75, 75, 75);
+                return;
+            }
+
+            try
+            {
+                string model = NormalizeRequiredStarDistModelPath(
+                    starDistModelPathBox.Text);
+                string manifest = NormalizeRequiredStarDistRuntimeManifestPath(
+                    starDistRuntimeManifestBox.Text);
+                starDistAuthorityStatusLabel.Text =
+                    "StarDist authority selected: " + Path.GetFileName(model) + " + " +
+                    Path.GetFileName(manifest) + ". The launcher checks regular files and " +
+                    "the manifest envelope; the engine binds exact model/runtime bytes and " +
+                    "loaded class origins. This does not validate scientific suitability.";
+                starDistAuthorityStatusLabel.ForeColor = Color.FromArgb(25, 80, 145);
+            }
+            catch (Exception ex)
+            {
+                starDistAuthorityStatusLabel.Text =
+                    "StarDist cannot launch: " + ex.Message;
+                starDistAuthorityStatusLabel.ForeColor = Color.DarkRed;
+            }
+        }
+
+        /// <summary>
+        /// UI/path validation only. Stage 1 remains the authority for the
+        /// profile schema, declared slide/package/series/grid identity, review
+        /// metadata and the exact profile/mask content hashes.
+        /// </summary>
+        internal static string NormalizeOptionalReferenceMaskProfile(string value)
+        {
+            string raw = (value ?? "").Trim();
+            if (raw.Length == 0) return "";
+            if (!Path.IsPathRooted(raw))
+                throw new InvalidOperationException(
+                    "Choose an absolute .json file path (relative paths are not accepted).");
+
+            string path;
+            try { path = Path.GetFullPath(raw); }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The selected path is invalid: " + ex.Message, ex);
+            }
+            if (!string.Equals(
+                    Path.GetExtension(path), ".json",
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "The reference-mask profile must have a .json extension.");
+            if (!File.Exists(path))
+                throw new InvalidOperationException(
+                    "The reference-mask profile does not exist: " + path);
+
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(path); }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The reference-mask profile cannot be inspected: " + ex.Message, ex);
+            }
+            if ((attributes & FileAttributes.Directory) != 0 ||
+                (attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException(
+                    "The reference-mask profile must be a regular, non-reparse JSON file.");
+
+            string jsonText;
+            try
+            {
+                using (FileStream input = new FileStream(
+                           path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                           65536, FileOptions.SequentialScan))
+                using (StreamReader reader = new StreamReader(
+                           input, new UTF8Encoding(false, true), true))
+                    jsonText = reader.ReadToEnd();
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The reference-mask profile is not a readable text file: " +
+                    ex.Message, ex);
+            }
+
+            try
+            {
+                System.Web.Script.Serialization.JavaScriptSerializer json =
+                    new System.Web.Script.Serialization.JavaScriptSerializer();
+                object document = json.DeserializeObject(jsonText);
+                if (!(document is Dictionary<string, object>))
+                    throw new InvalidOperationException(
+                        "The reference-mask profile JSON root must be an object.");
+            }
+            catch (InvalidOperationException) { throw; }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The reference-mask profile is not valid JSON: " + ex.Message, ex);
+            }
+            return path;
+        }
+
+        internal static string NormalizeRequiredStarDistModelPath(string value)
+        {
+            return NormalizeRequiredRegularFile(
+                value, ".zip", "StarDist model", 0L);
+        }
+
+        internal static string NormalizeRequiredStarDistRuntimeManifestPath(string value)
+        {
+            const long MaxManifestBytes = 1024L * 1024L;
+            string path = NormalizeRequiredRegularFile(
+                value, ".json", "StarDist runtime manifest", MaxManifestBytes);
+
+            string jsonText;
+            try
+            {
+                byte[] bytes;
+                using (FileStream input = new FileStream(
+                           path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                           65536, FileOptions.SequentialScan))
+                {
+                    if (input.Length > MaxManifestBytes)
+                        throw new InvalidOperationException(
+                            "The StarDist runtime manifest exceeds the 1 MiB limit.");
+                    bytes = new byte[(int)input.Length];
+                    int offset = 0;
+                    while (offset < bytes.Length)
+                    {
+                        int count = input.Read(bytes, offset, bytes.Length - offset);
+                        if (count <= 0)
+                            throw new EndOfStreamException(
+                                "The StarDist runtime manifest ended before its declared length.");
+                        offset += count;
+                    }
+                }
+                jsonText = new UTF8Encoding(false, true).GetString(bytes);
+                if (jsonText.StartsWith("\uFEFF", StringComparison.Ordinal))
+                    jsonText = jsonText.Substring(1);
+            }
+            catch (InvalidOperationException) { throw; }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest is not readable strict UTF-8: " +
+                    ex.Message, ex);
+            }
+
+            Dictionary<string, object> document;
+            try
+            {
+                System.Web.Script.Serialization.JavaScriptSerializer json =
+                    new System.Web.Script.Serialization.JavaScriptSerializer();
+                document = json.DeserializeObject(jsonText) as Dictionary<string, object>;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest is not valid JSON: " + ex.Message, ex);
+            }
+            if (document == null)
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest JSON root must be an object.");
+            string[] required = new string[]
+                { "schema_version", "profile_id", "artifacts" };
+            if (document.Count != required.Length)
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest must contain exactly schema_version, " +
+                    "profile_id and artifacts.");
+            foreach (string name in required)
+                if (!document.ContainsKey(name))
+                    throw new InvalidOperationException(
+                        "The StarDist runtime manifest is missing " + name + ".");
+            string schemaVersion = document["schema_version"] as string;
+            string profileId = document["profile_id"] as string;
+            if (!string.Equals(schemaVersion, "1.0.0", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest schema_version must be 1.0.0.");
+            if (string.IsNullOrEmpty(profileId) ||
+                !System.Text.RegularExpressions.Regex.IsMatch(
+                    profileId, @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z"))
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest profile_id is not a safe token.");
+            object[] artifacts = document["artifacts"] as object[];
+            if (artifacts == null || artifacts.Length < 4)
+                throw new InvalidOperationException(
+                    "The StarDist runtime manifest must declare at least four artifacts.");
+            return path;
+        }
+
+        private static string NormalizeRequiredRegularFile(
+            string value, string extension, string label, long maximumBytes)
+        {
+            string raw = (value ?? "").Trim();
+            if (raw.Length == 0)
+                throw new InvalidOperationException(label + " is required.");
+            if (!Path.IsPathRooted(raw))
+                throw new InvalidOperationException(
+                    label + " must use an absolute path.");
+
+            string path;
+            try { path = Path.GetFullPath(raw); }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    label + " path is invalid: " + ex.Message, ex);
+            }
+            if (!string.Equals(
+                    Path.GetExtension(path), extension,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    label + " must have a " + extension + " extension.");
+            if (!File.Exists(path))
+                throw new InvalidOperationException(
+                    label + " does not exist: " + path);
+
+            FileAttributes attributes;
+            long length;
+            try
+            {
+                attributes = File.GetAttributes(path);
+                length = new FileInfo(path).Length;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    label + " cannot be inspected: " + ex.Message, ex);
+            }
+            if ((attributes & (FileAttributes.Directory |
+                               FileAttributes.ReparsePoint |
+                               FileAttributes.Device)) != 0)
+                throw new InvalidOperationException(
+                    label + " must be a regular, non-reparse file.");
+            if (length <= 0)
+                throw new InvalidOperationException(label + " must not be empty.");
+            if (maximumBytes > 0 && length > maximumBytes)
+                throw new InvalidOperationException(
+                    label + " exceeds the " +
+                    (maximumBytes / (1024L * 1024L)).ToString(
+                        CultureInfo.InvariantCulture) + " MiB limit.");
+            return path;
         }
 
         private void BuildMeasurementGroup()
@@ -861,7 +1306,11 @@ namespace IFQuantLauncher
             tissueModeBox.SelectedIndexChanged += refresh;
             compartmentModeBox.SelectedIndexChanged += refresh;
             wholeCompartmentBox.SelectedIndexChanged += refresh;
-            segmenterBox.SelectedIndexChanged += refresh;
+            segmenterBox.SelectedIndexChanged += delegate
+            {
+                UpdateStarDistAuthorityVisibility();
+                RefreshGateSummary();
+            };
             minNucleiBox.ValueChanged += refresh;
             advancedBox.TextChanged += refresh;
             panelConfigBox.TextChanged += refresh;
@@ -873,6 +1322,11 @@ namespace IFQuantLauncher
             wsiInputBox.TextChanged += refresh;
             wsiOutputBox.TextChanged += refresh;
             slideMetadataBox.TextChanged += refresh;
+            referenceMaskProfileBox.TextChanged += delegate
+            {
+                UpdateReferenceMaskStatus();
+                RefreshGateSummary();
+            };
         }
 
         // =================================================================
@@ -955,9 +1409,11 @@ namespace IFQuantLauncher
             measurementGroup.Visible = !legacy;
             tierBox.Visible = !legacy;
             tierBox.Enabled = !legacy;
-            invocationBox.Enabled = !legacy;
+            invocationBox.Enabled = !legacy && !slide;
             if (legacy)
                 invocationBox.SelectedIndex = 0;
+            else if (slide)
+                invocationBox.SelectedIndex = 1;
             else if (GetWindowsArchitecture() == "ARM64")
                 invocationBox.SelectedIndex = 1;
 
@@ -970,6 +1426,8 @@ namespace IFQuantLauncher
             maxImagesBox.Enabled = !slide;
             inputBox.Enabled = !slide;
             previewButton.Visible = !slide;
+
+            UpdateStarDistAuthorityVisibility();
 
             RebuildThresholdGrid();
             RefreshGateSummary();
@@ -1421,6 +1879,9 @@ namespace IFQuantLauncher
             request.WsiInput = wsiInputBox.Text.Trim();
             request.WsiOutput = wsiOutputBox.Text.Trim();
             request.SlideMetadataCsv = slideMetadataBox.Text.Trim();
+            request.WsiReferenceMaskProfile = request.Route == ImageRoute.IfSlideScanner
+                ? NormalizeOptionalReferenceMaskProfile(referenceMaskProfileBox.Text)
+                : "";
             request.WsiResume = wsiResumeBox.Checked;
             request.WsiPartitionDamage = wsiPartitionBox.Checked;
             request.WsiMaxTilesPerSlide = Decimal.ToInt32(wsiMaxTilesBox.Value);
@@ -1431,6 +1892,17 @@ namespace IFQuantLauncher
             request.PanelKey = panelKey;
             request.PanelConfigJson = panelConfigBox.Text.Trim();
             request.Segmenter = ChoiceKey(segmenterBox);
+            bool modernStarDist = request.Route != ImageRoute.LegacyFiji172 &&
+                string.Equals(
+                    request.Segmenter, "stardist",
+                    StringComparison.OrdinalIgnoreCase);
+            request.StarDistModelPath = modernStarDist
+                ? NormalizeRequiredStarDistModelPath(starDistModelPathBox.Text)
+                : "";
+            request.StarDistRuntimeManifestPath = modernStarDist
+                ? NormalizeRequiredStarDistRuntimeManifestPath(
+                    starDistRuntimeManifestBox.Text)
+                : "";
             request.Projection = ChoiceKey(projectionBox);
             request.SinglePlane = Decimal.ToInt32(singlePlaneBox.Value);
             request.TissueMode = ChoiceKey(tissueModeBox);
@@ -1646,6 +2118,61 @@ namespace IFQuantLauncher
             text.AppendLine("  " + config.InputDirectory);
             text.AppendLine();
 
+            if (request.Route != ImageRoute.LegacyFiji172)
+            {
+                text.AppendLine("NUCLEUS SEGMENTER / CLAIM BOUNDARY");
+                text.AppendLine("  " + request.Segmenter);
+                if (string.Equals(
+                        request.Segmenter, "stardist",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    text.AppendLine("  exported model: " + request.StarDistModelPath);
+                    text.AppendLine(
+                        "  runtime manifest: " +
+                        request.StarDistRuntimeManifestPath);
+                    text.AppendLine(
+                        "  Launcher check: regular non-reparse .zip/.json files and a " +
+                        "closed manifest envelope. Engine authority: exact model/runtime " +
+                        "bytes and loaded runtime class origins before and after analysis.");
+                    text.AppendLine(
+                        "  Content provenance does not establish segmentation performance " +
+                        "or scientific suitability.");
+                }
+                else
+                {
+                    text.AppendLine(
+                        "  StarDist model/runtime paths are absent from the Stage 2 " +
+                        "environment.");
+                }
+                text.AppendLine();
+            }
+
+            if (request.Route == ImageRoute.IfSlideScanner)
+            {
+                text.AppendLine("REFERENCE MASK / CLAIM BOUNDARY");
+                if (string.IsNullOrEmpty(request.WsiReferenceMaskProfile))
+                {
+                    text.AppendLine(
+                        "  automatic DAPI/Otsu engineering mask (airways not excluded)");
+                    text.AppendLine(
+                        "  This is an engineering reference space, not an independently " +
+                        "validated anatomical reference.");
+                }
+                else
+                {
+                    text.AppendLine("  external profile: " +
+                                    request.WsiReferenceMaskProfile);
+                    text.AppendLine(
+                        "  Launcher check: regular non-reparse JSON object. Stage 1 " +
+                        "authority: profile contract, slide/package/series/grid identity, " +
+                        "and exact profile/mask bytes before publication.");
+                    text.AppendLine(
+                        "  Selection or a declared review state does not independently " +
+                        "establish biological validity.");
+                }
+                text.AppendLine();
+            }
+
             text.AppendLine("PANEL");
             text.AppendLine("  " + DescribePanelAllocation(config));
             text.AppendLine();
@@ -1735,53 +2262,140 @@ namespace IFQuantLauncher
             {
                 string failure = null;
                 int lastExit = 0;
+                List<Stage1SlideLayout> slides = null;
+                bool dryRunComplete = false;
                 try
                 {
-                    AppendLog("Stage 1 — tiling the slide with QuPath.");
+                    AppendLog("Route 2 preflight - validating the packaged Python runtime.");
                     lastExit = RunStage(
-                        config.QuPathExecutable,
-                        "script " + QuoteArgument(config.Stage1ScriptPath),
-                        config.RuntimeDirectory, config.Stage1Seal);
+                        config.PythonExecutable,
+                        QuoteArgument(config.Stage2IndexBuilderPath) + " --help",
+                        config.RuntimeDirectory, config.Stage3Seal);
                     if (lastExit != 0)
-                        failure = "Stage 1 (QuPath tiling) exited " + lastExit +
-                                  ". No tiles can be trusted, so stage 2 was not started.";
-
-                    string manifest = failure == null
-                        ? Path.Combine(config.Request.WsiOutput, "stage1_manifest.json")
-                        : null;
-                    if (failure == null && !File.Exists(manifest))
-                        failure = "Stage 1 exited 0 but wrote no stage1_manifest.json at " +
-                                  manifest + ". Without it there is no record of whether tissue " +
-                                  "coverage was complete, so stage 2 was not started.";
+                        failure = "The packaged Stage 2 index builder cannot run with the " +
+                                  "selected Python (exit " + lastExit + "). Stage 1 was not started.";
+                    if (failure == null)
+                    {
+                        lastExit = RunStage(
+                            config.PythonExecutable,
+                            QuoteArgument(config.Stage3ScriptPath) + " --help",
+                            config.RuntimeDirectory, config.Stage3Seal);
+                        if (lastExit != 0)
+                            failure = "The packaged Stage 3 runtime cannot run with the selected " +
+                                      "Python (exit " + lastExit + "). Stage 1 was not started.";
+                    }
+                    if (failure == null)
+                    {
+                        lastExit = RunStage(
+                            config.PythonExecutable,
+                            QuoteArgument(config.Stage4ScriptPath) + " --help",
+                            config.RuntimeDirectory, config.Stage4Seal);
+                        if (lastExit != 0)
+                            failure = "The packaged Stage 4 runtime cannot run with the selected " +
+                                      "Python (exit " + lastExit + "). Stage 1 was not started.";
+                    }
 
                     if (failure == null)
                     {
-                        AppendLog("Stage 2 — measuring every tile with the frozen Fiji engine.");
+                        AppendLog("Stage 1 - tiling the slide with QuPath.");
                         lastExit = RunStage(
-                            config.FijiExecutable, config.FijiArguments,
-                            config.RuntimeDirectory, config.Stage2Seal);
-                        string runManifest =
-                            Path.Combine(config.OutputDirectory, "run_manifest.json");
-                        if (!File.Exists(runManifest))
-                            failure = "Stage 2 wrote no run_manifest.json. Its exit code (" +
-                                      lastExit + ") is not a success criterion — the manifest is.";
+                            config.QuPathExecutable,
+                            "script " + QuoteArgument(config.Stage1ScriptPath),
+                            config.RuntimeDirectory, config.Stage1Seal);
+                    }
+                    if (failure == null && lastExit != 0)
+                        failure = "Stage 1 (QuPath tiling) exited " + lastExit +
+                                  ". No tiles can be trusted, so stage 2 was not started.";
+
+                    if (failure == null)
+                    {
+                        slides = Stage1LayoutDiscovery.Discover(config.OutputDirectory);
+                        AppendLog("Stage 1 declared " + slides.Count + " slide(s).");
+                        if (config.Request.Tier == RunTier.Dry)
+                        {
+                            AssertStage1DryRunManifest(config.OutputDirectory);
+                            dryRunComplete = true;
+                            AppendLog(
+                                "Stage 1 dry manifest verified. Dry is a terminal tiling " +
+                                "smoke test; Stages 2-4 will not run.");
+                        }
                     }
 
-                    if (failure == null && config.PythonExecutable != null)
+                    if (failure == null && !dryRunComplete)
                     {
-                        AppendLog("Stage 3 — reconciling tiles to a slide.");
+                        foreach (Stage1SlideLayout slide in slides)
+                        {
+                            AppendLog("Stage 2 - sharded Fiji measurement for " +
+                                      slide.SlideStem + ".");
+                            lastExit = RunStage(
+                                config.PowerShellExecutable,
+                                BuildStage2OrchestratorArguments(config, slide),
+                                config.RuntimeDirectory, config.Stage2Seal);
+                            if (lastExit != 0)
+                            {
+                                failure = "Stage 2 orchestration failed for slide '" +
+                                          slide.SlideStem + "' (exit " + lastExit + ").";
+                                break;
+                            }
+                            if (!File.Exists(slide.Stage2IndexPath))
+                            {
+                                failure = "Stage 2 exited 0 for slide '" + slide.SlideStem +
+                                          "' but did not publish stage2_run_index.json. Stage 3 " +
+                                          "was not started.";
+                                break;
+                            }
+                        }
+                    }
+
+                    if (failure == null && !dryRunComplete)
+                    {
+                        AppendLog("Stage 3 - reconciling all declared slides once.");
+                        string manifest = Path.Combine(
+                            config.OutputDirectory, "stage1_manifest.json");
                         lastExit = RunStage(
                             config.PythonExecutable,
                             QuoteArgument(config.Stage3ScriptPath) +
-                            " --slide-root " + QuoteArgument(config.Request.WsiOutput),
+                            " --slide-root " + QuoteArgument(config.OutputDirectory) +
+                            " --stage1-manifest " + QuoteArgument(manifest) +
+                            " --stage2-script " + QuoteArgument(config.ScriptPath),
                             config.RuntimeDirectory, config.Stage3Seal);
                         string slideSummary = Path.Combine(
-                            config.Request.WsiOutput, "stats", "slide_level_summary.csv");
+                            config.OutputDirectory, "stats", "slide_level_summary.csv");
                         if (lastExit != 0 || !File.Exists(slideSummary))
                             failure = "Stage 3 did not write stats/slide_level_summary.csv " +
                                       "(exit " + lastExit + "). It refuses to write one on a " +
                                       "missing tile or an area mismatch, so this is the stage " +
                                       "telling you the slide does not add up.";
+                    }
+
+                    if (failure == null && !dryRunComplete && !config.Gate.Exploratory)
+                    {
+                        AppendLog("Stage 4 - aggregating slides to mouse and group summaries.");
+                        string statsDirectory = Path.Combine(config.OutputDirectory, "stats");
+                        string slideSummary = Path.Combine(
+                            statsDirectory, "slide_level_summary.csv");
+                        lastExit = RunStage(
+                            config.PythonExecutable,
+                            QuoteArgument(config.Stage4ScriptPath) + " " +
+                            QuoteArgument(slideSummary) +
+                            " --outdir " + QuoteArgument(statsDirectory),
+                            config.RuntimeDirectory, config.Stage4Seal);
+                        string mouseSummary = Path.Combine(
+                            statsDirectory, "mouse_level_summary.csv");
+                        string groupSummary = Path.Combine(
+                            statsDirectory, "group_level_summary.csv");
+                        if (lastExit != 0 || !File.Exists(mouseSummary) ||
+                            !File.Exists(groupSummary))
+                            failure = "Stage 4 did not publish both mouse_level_summary.csv and " +
+                                      "group_level_summary.csv (exit " + lastExit + "). The " +
+                                      "whole-slide route is incomplete.";
+                    }
+                    else if (failure == null && !dryRunComplete &&
+                             config.Gate.Exploratory)
+                    {
+                        AppendLog(
+                            "EXPLORATORY: Stage 4 was deliberately skipped. Mouse/group " +
+                            "summaries must never be published from an adaptive-threshold run.");
                     }
                 }
                 catch (Exception ex)
@@ -1793,9 +2407,211 @@ namespace IFQuantLauncher
                 string finalFailure = failure;
                 BeginInvoke(new Action(delegate
                 {
-                    FinishAnalysis(config, finalExit, finalFailure);
+                    FinishSlideScannerRun(
+                        config, finalExit, finalFailure, slides, dryRunComplete);
                 }));
             });
+        }
+
+        internal static void AssertStage1DryRunManifest(string stage1Root)
+        {
+            string manifestPath = Path.Combine(stage1Root, "stage1_manifest.json");
+            Dictionary<string, object> document;
+            try
+            {
+                System.Web.Script.Serialization.JavaScriptSerializer json =
+                    new System.Web.Script.Serialization.JavaScriptSerializer();
+                document = json.Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(manifestPath, Encoding.UTF8));
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "The Stage 1 dry manifest could not be read: " + ex.Message, ex);
+            }
+
+            object slidesObject;
+            System.Collections.IEnumerable slides = null;
+            if (document != null && document.TryGetValue("slides", out slidesObject) &&
+                !(slidesObject is string))
+                slides = slidesObject as System.Collections.IEnumerable;
+            if (slides == null)
+                throw new InvalidOperationException(
+                    "Stage 1 dry manifest does not contain a slides array. Stages 2-4 " +
+                    "were not started.");
+
+            int slideCount = 0;
+            foreach (object item in slides)
+            {
+                slideCount++;
+                Dictionary<string, object> slide = item as Dictionary<string, object>;
+                object stemObject;
+                string stem = slide != null &&
+                              slide.TryGetValue("slide_stem", out stemObject)
+                    ? Convert.ToString(stemObject, CultureInfo.InvariantCulture)
+                    : "(unknown slide)";
+                object dryRun;
+                object coverageComplete;
+                object nWritten;
+                bool writtenIsZero = nWrittenIsIntegerZero(
+                    slide, "n_written", out nWritten);
+                if (slide == null || !slide.TryGetValue("dry_run", out dryRun) ||
+                    !(dryRun is bool) || !(bool)dryRun ||
+                    !slide.TryGetValue("coverage_complete", out coverageComplete) ||
+                    !(coverageComplete is bool) || (bool)coverageComplete ||
+                    !writtenIsZero)
+                    throw new InvalidOperationException(
+                        "Stage 1 was started in Dry tier but slide '" + stem +
+                        "' does not declare dry_run=true, coverage_complete=false and " +
+                        "integer n_written=0. Stages 2-4 were not started.");
+            }
+            if (slideCount == 0)
+                throw new InvalidOperationException(
+                    "Stage 1 dry manifest declares no slides. Stages 2-4 were not started.");
+        }
+
+        private static bool nWrittenIsIntegerZero(
+            Dictionary<string, object> slide, string key, out object value)
+        {
+            value = null;
+            if (slide == null || !slide.TryGetValue(key, out value) || value == null)
+                return false;
+            return (value is int && (int)value == 0) ||
+                   (value is long && (long)value == 0L) ||
+                   (value is short && (short)value == 0) ||
+                   (value is byte && (byte)value == 0);
+        }
+
+        internal static string BuildStage2OrchestratorArguments(
+            RunConfiguration config, Stage1SlideLayout slide)
+        {
+            StringBuilder args = new StringBuilder();
+            args.Append("-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ")
+                .Append(QuoteArgument(config.Stage2OrchestratorPath))
+                .Append(" -UseInheritedIfqConfig")
+                .Append(" -TilesDir ").Append(QuoteArgument(slide.TilesDirectory))
+                .Append(" -OutputRoot ").Append(QuoteArgument(slide.SlideDirectory))
+                .Append(" -Shards 4")
+                .Append(" -FijiDir ").Append(QuoteArgument(config.FijiDirectory))
+                .Append(" -ScriptPath ").Append(QuoteArgument(config.ScriptPath))
+                .Append(" -MarkerRegistryPath ").Append(QuoteArgument(config.RegistryPath))
+                .Append(" -Panel ").Append(QuoteArgument(config.Environment["IFQ_PANEL"]))
+                .Append(" -Segmenter ").Append(QuoteArgument(config.Environment["IFQ_SEGMENTER"]))
+                .Append(" -StarDistProbability ")
+                .Append(QuoteArgument(config.Environment["IFQ_STARDIST_PROB"]))
+                .Append(" -StarDistNms ")
+                .Append(QuoteArgument(config.Environment["IFQ_STARDIST_NMS"]))
+                .Append(" -StarDistTiles ")
+                .Append(QuoteArgument(config.Environment["IFQ_STARDIST_TILES"]))
+                .Append(" -PythonExe ").Append(QuoteArgument(config.PythonExecutable));
+            if (string.Equals(
+                    config.Environment["IFQ_SEGMENTER"], "stardist",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                args.Append(" -StarDistModelPath ")
+                    .Append(QuoteArgument(
+                        config.Environment["IFQ_STARDIST_MODEL_PATH"]))
+                    .Append(" -StarDistRuntimeManifest ")
+                    .Append(QuoteArgument(
+                        config.Environment["IFQ_STARDIST_RUNTIME_MANIFEST"]));
+            }
+            if (!string.IsNullOrWhiteSpace(config.Request.PanelConfigJson))
+                args.Append(" -PanelConfigPath ")
+                    .Append(QuoteArgument(Path.GetFullPath(config.Request.PanelConfigJson)));
+            return args.ToString();
+        }
+
+        private void FinishSlideScannerRun(
+            RunConfiguration config, int exitCode, string failure,
+            List<Stage1SlideLayout> slides, bool dryRunComplete)
+        {
+            SetRunningState(false);
+            bool cancellation = CancellationWasRequested;
+            string summary = Path.Combine(
+                config.OutputDirectory, "stats", "slide_level_summary.csv");
+            string mouseSummary = Path.Combine(
+                config.OutputDirectory, "stats", "mouse_level_summary.csv");
+            string groupSummary = Path.Combine(
+                config.OutputDirectory, "stats", "group_level_summary.csv");
+            int declaredSlides = slides == null ? 0 : slides.Count;
+            int publishedIndexes = slides == null ? 0 : slides.FindAll(
+                delegate(Stage1SlideLayout slide) { return File.Exists(slide.Stage2IndexPath); }).Count;
+            bool aggregationEligible = config.Request.Tier != RunTier.Dry &&
+                                       config.Gate != null && !config.Gate.Exploratory;
+            bool complete = !cancellation && aggregationEligible && failure == null &&
+                            exitCode == 0 &&
+                            declaredSlides > 0 && publishedIndexes == declaredSlides &&
+                            File.Exists(summary) && File.Exists(mouseSummary) &&
+                            File.Exists(groupSummary);
+            bool exploratorySlideComplete = config.Request.Tier != RunTier.Dry &&
+                                            config.Gate != null &&
+                                            config.Gate.Exploratory && !cancellation &&
+                                            failure == null &&
+                                            exitCode == 0 && declaredSlides > 0 &&
+                                            publishedIndexes == declaredSlides &&
+                                            File.Exists(summary);
+            bool dryComplete = !cancellation && dryRunComplete && failure == null &&
+                               exitCode == 0 && declaredSlides > 0;
+
+            string status = cancellation
+                ? "cancelled"
+                : (complete
+                ? "complete"
+                : (exploratorySlideComplete
+                    ? "complete_exploratory_slide_only"
+                    : (dryComplete ? "dry_run_complete" : "incomplete")));
+
+            WriteLauncherRecord(config, exitCode, status);
+            AppendLog("");
+            AppendLog("Route 2 terminal exit code: " + exitCode);
+            if (!dryComplete)
+                AppendLog("Stage 2 indexes: " + publishedIndexes + "/" + declaredSlides + ".");
+            if (failure != null) AppendLog("Failure: " + failure);
+            lastSummaryPath = complete
+                ? mouseSummary
+                : (exploratorySlideComplete ? summary : null);
+            openSummaryButton.Enabled = lastSummaryPath != null;
+            openOutputButton.Enabled = Directory.Exists(config.OutputDirectory);
+
+            if (cancellation)
+                SetProgressTerminal(
+                    "Whole-slide analysis was cancelled. Partial outputs are troubleshooting-only and must not be aggregated.",
+                    false, true);
+            else if (dryComplete)
+            {
+                SetProgressTerminal(
+                    "Stage 1 dry smoke test finished successfully. No tile images were " +
+                    "exported and Stages 2-4 did not run.", true, false);
+                statusLabel.Text = "Complete - Stage 1 dry smoke test verified";
+                AppendLog(
+                    "Dry manifest: " + Path.Combine(
+                        config.OutputDirectory, "stage1_manifest.json"));
+            }
+            else if (exploratorySlideComplete)
+            {
+                SetProgressTerminal(
+                    "Exploratory slide reconciliation finished. Stage 4 was skipped and no " +
+                    "mouse/group summary was published; this output must not be aggregated.",
+                    false, false);
+                statusLabel.Text = "Exploratory slide-only output - do not aggregate";
+                statusLabel.ForeColor = Color.DarkOrange;
+                AppendLog("Exploratory slide-level CSV: " + summary);
+            }
+            else if (complete)
+            {
+                SetProgressTerminal(
+                    "Finished successfully: " + declaredSlides +
+                    " declared slide(s), each bound to an authoritative Stage 2 index.",
+                    true, false);
+                AppendLog("Slide-level CSV: " + summary);
+                AppendLog("Mouse-level CSV: " + mouseSummary);
+                AppendLog("Group-level CSV: " + groupSummary);
+            }
+            else
+                SetProgressTerminal(
+                    "Whole-slide analysis was incomplete. " + (failure ??
+                    "Required indexed outputs are missing; review the log."), false, false);
+            DeleteTemporaryPanelMap(config);
         }
 
         /// <summary>
@@ -1831,17 +2647,38 @@ namespace IFQuantLauncher
             {
                 if (!string.IsNullOrEmpty(e.Data)) HandleFijiLine(e.Data, true);
             };
-            lock (processLock) { runningProcess = process; }
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            process.WaitForExit();
-            int exitCode = process.ExitCode;
-            lock (processLock)
+            ProcessJob processJob = null;
+            ContainedStageLaunch containedLaunch = null;
+            try
             {
-                if (ReferenceEquals(runningProcess, process)) runningProcess = null;
+                containedLaunch = ContainedStageLaunch.Prepare(psi);
+                processJob = ProcessJob.CreateArmed();
+                lock (processLock)
+                {
+                    ThrowIfCancellationRequested();
+                    process.Start();
+                    processJob.AssignOrTerminate(process);
+                    runningProcess = process;
+                    runningProcessJob = processJob;
+                    containedLaunch.Release();
+                }
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                process.WaitForExit();
+                return process.ExitCode;
             }
-            return exitCode;
+            finally
+            {
+                lock (processLock)
+                {
+                    if (ReferenceEquals(runningProcess, process)) runningProcess = null;
+                    if (ReferenceEquals(runningProcessJob, processJob))
+                        runningProcessJob = null;
+                }
+                if (processJob != null) processJob.Dispose();
+                if (containedLaunch != null) containedLaunch.Dispose();
+                process.Dispose();
+            }
         }
     }
 

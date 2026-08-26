@@ -53,8 +53,13 @@ namespace IFQuantLauncher.Routing
         // Version 1.9.4 fixes native ARM64 detection and prevents modern routes
         // from using Fiji's ARM64 launcher executable, which can exit 0 without
         // running the script or writing a manifest.
-        public const string Version = "1.9.5";
-        public const string AssemblyVersion = "1.9.5.0";
+        // Version 1.9.5 fixes invalid anatomical-gating failures. Version 1.9.6
+        // disables unsafe Stage 1 resume, seals ordered acquisition-channel
+        // checks, and exposes the complete validated StarDist setting surface.
+        // Version 1.9.7 completes Route 2 with authoritative sharded Stage 2
+        // indexes and one manifest-bound Stage 3 aggregation.
+        public const string Version = "1.9.7";
+        public const string AssemblyVersion = "1.9.7.0";
 
         // =============================================================
         // >>> THE ONE LINE THAT RE-ENABLES ROUTE 3 (H&E / brightfield) <<<
@@ -906,13 +911,15 @@ namespace IFQuantLauncher.Routing
         public static readonly HashSet<string> Stage1Static =
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "IFQ_WSI_AGER_CHANNEL", "IFQ_WSI_AGER_THRESHOLD", "IFQ_WSI_CHANNEL_PATTERNS",
+                "IFQ_WSI_AGER_CHANNEL", "IFQ_WSI_AGER_THRESHOLD", "IFQ_WSI_ORDERED_CHANNEL_PATTERNS",
                 "IFQ_WSI_COMPRESSION", "IFQ_WSI_CORE_PX", "IFQ_WSI_DAMAGE_CUTOFF",
                 "IFQ_WSI_DAMAGE_SIGMA_UM", "IFQ_WSI_DRY_RUN", "IFQ_WSI_EXPECT_CHANNELS",
                 "IFQ_WSI_FILL_INTERIOR_RINGS", "IFQ_WSI_HALO_PX", "IFQ_WSI_INPUT",
                 "IFQ_WSI_MAX_PIXEL_UM", "IFQ_WSI_MAX_TILES_PER_SLIDE", "IFQ_WSI_MIN_FRAGMENT_MM2",
                 "IFQ_WSI_MIN_TILE_TISSUE_UM2", "IFQ_WSI_OUTPUT", "IFQ_WSI_PANEL",
                 "IFQ_WSI_PARALLEL", "IFQ_WSI_PARTITION_DAMAGE", "IFQ_WSI_RESUME",
+                "IFQ_WSI_REFERENCE_MASK_PROFILE",
+                "IFQ_WSI_STAGE1_SCRIPT_PATH",
                 "IFQ_WSI_ROI_COMPARTMENT", "IFQ_WSI_ROI_NAME", "IFQ_WSI_ROI_NAME_DAMAGED",
                 "IFQ_WSI_ROI_NAME_INTACT", "IFQ_WSI_SLIDE_METADATA", "IFQ_WSI_TISSUE_BLUR_SIGMA",
                 "IFQ_WSI_TISSUE_CLOSE_RADIUS", "IFQ_WSI_TISSUE_DOWNSAMPLE",
@@ -931,7 +938,7 @@ namespace IFQuantLauncher.Routing
                 "IFQ_DAPI_CONTRAST_SATURATION", "IFQ_DAPI_LOCAL_RADIUS_UM", "IFQ_DAPI_METHOD",
                 "IFQ_DISPLAY_GAMMA", "IFQ_DISPLAY_HIGH_PERCENTILE", "IFQ_DISPLAY_LOW_PERCENTILE",
                 "IFQ_DISPLAY_PREVIEW_ONLY", "IFQ_DISPLAY_SCALE_BAR_UM", "IFQ_DISPLAY_SCALE_BAR_THICKNESS_PX",
-                "IFQ_EXPORT_DISPLAY_CHANNELS", "IFQ_INCLUDE_REGEX", "IFQ_CANONICAL_MANIFEST_PATH",
+                "IFQ_ENGINE_SCRIPT_PATH", "IFQ_EXPORT_DISPLAY_CHANNELS", "IFQ_INCLUDE_REGEX", "IFQ_CANONICAL_MANIFEST_PATH",
                 "IFQ_INPUT_DIR", "IFQ_MARKER_REGISTRY", "IFQ_MAX_IMAGES", "IFQ_MIN_INCLUDED_NUCLEI",
                 "IFQ_MIN_NUCLEUS_AREA_UM2", "IFQ_MORPHOLOGY_PRIMARY", "IFQ_MRAGE_MIN_RING_FRACTION",
                 "IFQ_OUTPUT_DIR", "IFQ_PANEL", "IFQ_PANEL_CONFIG", "IFQ_PANEL_MAP_PATH",
@@ -939,7 +946,9 @@ namespace IFQuantLauncher.Routing
                 "IFQ_SINGLE_PLANE", "IFQ_T1A_MIN_RING_FRACTION", "IFQ_TISSUE_MODE",
                 "IFQ_WHOLE_FIELD_COMPARTMENT", "IFQ_Z_APICAL_PLANES", "IFQ_Z_APICAL_RANGE",
                 "IFQ_Z_CELL_BODY_PLANES", "IFQ_Z_CELL_BODY_RANGE", "IFQ_Z_NUCLEAR_RANGE",
-                "IFQ_MORPHOLOGY_PRIMARY", "IFQ_STARDIST_PROB", "IFQ_STARDIST_NMS"
+                "IFQ_MORPHOLOGY_PRIMARY", "IFQ_STARDIST_PROB", "IFQ_STARDIST_NMS",
+                "IFQ_STARDIST_TILES", "IFQ_STARDIST_MODEL_PATH",
+                "IFQ_STARDIST_RUNTIME_MANIFEST"
             };
 
         public static readonly Dictionary<string, string> MarkerSuffixes =
@@ -967,12 +976,16 @@ namespace IFQuantLauncher.Routing
                 "IFQ_TISSUE_MODE", "IFQ_COMPARTMENT_MODE",
                 "IFQ_WHOLE_FIELD_COMPARTMENT",
                 "IFQ_ALLOW_NONEMPTY_OUTPUT", "IFQ_MORPHOLOGY_PRIMARY",
+                "IFQ_ENGINE_SCRIPT_PATH",
+                "IFQ_STARDIST_MODEL_PATH", "IFQ_STARDIST_RUNTIME_MANIFEST",
                 // new in v1.8.0
                 // H3: the sparse-region floor now has a first-class control, so
                 // it must not also be settable behind the UI's back.
                 "IFQ_MIN_INCLUDED_NUCLEI",
                 // Stage 1 identity: one panel control writes both panel names.
-                "IFQ_WSI_PANEL", "IFQ_WSI_INPUT", "IFQ_WSI_OUTPUT"
+                "IFQ_WSI_PANEL", "IFQ_WSI_INPUT", "IFQ_WSI_OUTPUT", "IFQ_WSI_RESUME",
+                "IFQ_WSI_REFERENCE_MASK_PROFILE",
+                "IFQ_WSI_STAGE1_SCRIPT_PATH"
             };
 
         public static EnvClassification Classify(string name, HashSet<string> panelTokens)
@@ -1095,17 +1108,21 @@ namespace IFQuantLauncher.Routing
                     spec.DisplayName = "2. IF - slide scanner (.vsi whole slide)";
                     spec.OneLine =
                         "QuPath reads and tiles the slide; the SAME frozen Fiji engine measures " +
-                        "the tiles; stage 3 reconciles tiles back to one slide. QuPath never " +
-                        "measures anything.";
+                        "the tiles; stages 3 and 4 reconcile them to slide, mouse and group " +
+                        "summaries. QuPath defines the tissue/tiling geometry and tissue-area " +
+                        "denominator; it does not measure marker positivity.";
                     spec.Stages.Add(new StageSpec(
                         "stage1", "Tile the slide (QuPath 0.7+, headless)", "qupath",
                         "tiles/*.ome.tif + tiles/*_RoiSet.zip + tiles/samplesheet.csv + stage1_manifest.json"));
                     spec.Stages.Add(new StageSpec(
                         "stage2", "Measure every tile (Fiji)", "fiji",
-                        "analysis/run_summary.csv, one row per tile per region"));
+                        "per-shard run_manifest.json + one hashed stage2_run_index.json per slide"));
                     spec.Stages.Add(new StageSpec(
                         "stage3", "Reconcile tiles to slide (Python)", "python",
                         "stats/slide_level_summary.csv"));
+                    spec.Stages.Add(new StageSpec(
+                        "stage4", "Aggregate slides to mouse and group (Python)", "python",
+                        "stats/mouse_level_summary.csv + stats/group_level_summary.csv"));
                     spec.RequiresFiji = true;
                     spec.RequiresQuPath = true;
                     spec.RequiresPython = true;
@@ -1249,7 +1266,8 @@ namespace IFQuantLauncher.Routing
         public string WsiInput;
         public string WsiOutput;
         public string SlideMetadataCsv;
-        public bool WsiResume = true;
+        public string WsiReferenceMaskProfile;
+        public bool WsiResume;
         public bool WsiPartitionDamage;
         public int WsiMaxTilesPerSlide;
 
@@ -1268,6 +1286,8 @@ namespace IFQuantLauncher.Routing
         /// </summary>
         public string PanelResolutionError;
         public string Segmenter = "classic";
+        public string StarDistModelPath;
+        public string StarDistRuntimeManifestPath;
         public string Projection = "layer_aware";
         public int SinglePlane = -1;
         public string TissueMode = "auto";
@@ -1466,6 +1486,52 @@ namespace IFQuantLauncher.Routing
                     Severity.Block, "PYTHON_MISSING",
                     "Stage 3 (aggregate_tiles_to_slide.py) is the only path from tile rows to a " +
                     "slide-level number. Without Python the run would stop at unreconciled tiles."));
+            if (request.Route == ImageRoute.IfSlideScanner &&
+                request.Invocation != FijiInvocation.BundledJvm)
+                result.Findings.Add(new GateFinding(
+                    Severity.Block, "WSI_REQUIRES_BUNDLED_JVM",
+                    "The whole-slide route is executed by the sharded Stage 2 orchestrator, " +
+                    "which requires Fiji's bundled Java runtime and ij1-patcher. Bundled JVM " +
+                    "invocation is mandatory for this route."));
+            if (request.Route == ImageRoute.IfSlideScanner && tools != null &&
+                !tools.PowerShellPresent)
+                result.Findings.Add(new GateFinding(
+                    Severity.Block, "POWERSHELL_MISSING",
+                    "The whole-slide route requires Windows PowerShell to run the authoritative " +
+                    "sharded Stage 2 orchestrator."));
+
+            bool selectsStarDist = string.Equals(
+                request.Segmenter, "stardist",
+                StringComparison.OrdinalIgnoreCase);
+            if (request.Route == ImageRoute.LegacyFiji172 && selectsStarDist)
+            {
+                result.Findings.Add(new GateFinding(
+                    Severity.Block,
+                    "LEGACY_STARDIST_AUTHORITY_UNREPRESENTABLE",
+                    "The current engine requires explicit StarDist model and runtime-manifest " +
+                    "authorities, but route 4 must preserve the exact v1.7.2 environment and " +
+                    "cannot add those keys. Select classic segmentation for route 4, or use " +
+                    "a modern route for content-bound StarDist."));
+            }
+            else if (selectsStarDist)
+            {
+                if (string.IsNullOrWhiteSpace(request.StarDistModelPath) ||
+                    string.IsNullOrWhiteSpace(request.StarDistRuntimeManifestPath))
+                    result.Findings.Add(new GateFinding(
+                        Severity.Block,
+                        "STARDIST_AUTHORITY_REQUIRED",
+                        "StarDist requires an explicit exported .zip model and a closed " +
+                        "runtime manifest. The launcher will not fall back to a plugin-managed " +
+                        "built-in model or an unrecorded Fiji plugin stack."));
+                else
+                    result.Findings.Add(new GateFinding(
+                        Severity.Note,
+                        "STARDIST_AUTHORITY_SELECTED",
+                        "The selected StarDist model and runtime manifest are configuration " +
+                        "authorities. The engine binds their exact bytes and loaded runtime " +
+                        "class origins; this provenance does not validate segmentation " +
+                        "performance or scientific suitability."));
+            }
 
             // Strict gating needs an independently supplied anatomical label.
             // whole_field always names its sole ROI "whole_field", so leaving the
@@ -1990,7 +2056,8 @@ namespace IFQuantLauncher.Routing
                     "creates a fresh timestamped folder, so seeing this means something else " +
                     "wrote into it."));
             }
-            if (string.IsNullOrEmpty(request.OutputBase))
+            if (request.Route != ImageRoute.IfSlideScanner &&
+                string.IsNullOrEmpty(request.OutputBase))
             {
                 result.Findings.Add(new GateFinding(
                     Severity.Block, "H4_OUTPUT_BASE_UNSET",
@@ -2013,6 +2080,12 @@ namespace IFQuantLauncher.Routing
                         "Choose the stage 1 output root. Tiles, ROI sets and " +
                         "stage1_manifest.json are written there and are read back by stages 2 " +
                         "and 3."));
+                if (request.WsiResume)
+                    result.Findings.Add(new GateFinding(
+                        Severity.Block, "WSI_RESUME_NOT_CONTENT_ADDRESSED",
+                        "Stage 1 resume is unavailable because existing tiles are not yet bound " +
+                        "to the source slide, tiling script, tissue mask, configuration and ROI " +
+                        "bytes by one content-addressed checkpoint. Use a new Stage 1 output root."));
                 if (request.PanelWasAuto)
                     result.Findings.Add(new GateFinding(
                         Severity.Block, "WSI_AUTO_PANEL",
@@ -2022,10 +2095,28 @@ namespace IFQuantLauncher.Routing
                         "animal silently split it into two rows."));
                 if (string.IsNullOrEmpty(request.SlideMetadataCsv))
                     result.Findings.Add(new GateFinding(
-                        Severity.Warn, "WSI_NO_SLIDE_METADATA",
-                        "No slide metadata CSV. Stage 1 will not be able to stamp mouse_id, " +
-                        "genotype and condition into the tile samplesheet, and the mouse-level " +
-                        "aggregation would have to be done by hand later."));
+                        Severity.Block,
+                        "WSI_NO_SLIDE_METADATA",
+                        "Choose the slide metadata CSV. Stage 1 requires resolvable slide " +
+                        "metadata even for a dry smoke test, and a quantitative run also " +
+                        "requires mouse_id before Stage 4 may publish mouse/group summaries."));
+                if (string.IsNullOrEmpty(request.WsiReferenceMaskProfile))
+                    result.Findings.Add(new GateFinding(
+                        Severity.Warn,
+                        "WSI_AUTOMATIC_DAPI_ENGINEERING_MASK",
+                        "No external reference-mask profile is selected. Stage 1 will use " +
+                        "the automatic DAPI/Otsu engineering mask, for which airway " +
+                        "exclusion is not available. This engineering reference space does " +
+                        "not establish anatomical truth."));
+                else
+                    result.Findings.Add(new GateFinding(
+                        Severity.Note,
+                        "WSI_EXTERNAL_REFERENCE_MASK_PROFILE",
+                        "An external reference-mask profile is selected. The launcher only " +
+                        "checks that the selected path is a regular JSON object; Stage 1 " +
+                        "validates the profile contract, slide/package/series/grid identity, " +
+                        "and exact profile/mask bytes before publishing its review metadata. " +
+                        "Selection alone does not establish biological validity."));
             }
 
             // ---------------------------------------------------------
@@ -2245,6 +2336,7 @@ namespace IFQuantLauncher.Routing
         public string WindowsArchitecture;
         public string QuPathExecutable;
         public string PythonExecutable;
+        public string PowerShellExecutable;
 
         public bool FijiPresent { get { return !string.IsNullOrEmpty(FijiExecutable); } }
         public bool BundledJvmPresent
@@ -2257,6 +2349,7 @@ namespace IFQuantLauncher.Routing
         }
         public bool QuPathPresent { get { return !string.IsNullOrEmpty(QuPathExecutable); } }
         public bool PythonPresent { get { return !string.IsNullOrEmpty(PythonExecutable); } }
+        public bool PowerShellPresent { get { return !string.IsNullOrEmpty(PowerShellExecutable); } }
 
         public static ToolInventory Resolve(
             string fijiPath, string quPathPath, string pythonPath, string windowsArchitecture)
@@ -2274,7 +2367,16 @@ namespace IFQuantLauncher.Routing
             }
             tools.QuPathExecutable = ResolveQuPath(quPathPath);
             tools.PythonExecutable = ResolvePython(pythonPath);
+            tools.PowerShellExecutable = ResolvePowerShell();
             return tools;
+        }
+
+        public static string ResolvePowerShell()
+        {
+            string candidate = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell", "v1.0", "powershell.exe");
+            return File.Exists(candidate) ? Path.GetFullPath(candidate) : null;
         }
 
         private static string ResolveFijiDirectory(string fijiPath, string resolvedExe)
@@ -2475,11 +2577,55 @@ namespace IFQuantLauncher.Routing
         }
     }
 
+    internal static class WindowsCommandLine
+    {
+        /// <summary>
+        /// Encode exactly one argv token for the Windows CommandLineToArgvW/
+        /// Microsoft C runtime parsing rules. ProcessStartInfo.ArgumentList is
+        /// unavailable on the .NET Framework used by the packaged launcher.
+        /// In particular, terminal backslashes must be doubled before the
+        /// closing quote or they escape that quote and consume the next token.
+        /// </summary>
+        public static string Quote(string value)
+        {
+            if (value == null) throw new ArgumentNullException("value");
+
+            StringBuilder quoted = new StringBuilder(value.Length + 2);
+            quoted.Append('"');
+            int backslashes = 0;
+            foreach (char character in value)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+                if (character == '"')
+                {
+                    quoted.Append('\\', (backslashes * 2) + 1);
+                    quoted.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                if (backslashes > 0)
+                {
+                    quoted.Append('\\', backslashes);
+                    backslashes = 0;
+                }
+                quoted.Append(character);
+            }
+            if (backslashes > 0)
+                quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
+        }
+    }
+
     internal static class FijiCommand
     {
         public static string Quote(string value)
         {
-            return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+            return WindowsCommandLine.Quote(value ?? "");
         }
 
         /// v1.7.2, verbatim (IFQuantLauncher.cs StartFijiRun):
@@ -2523,7 +2669,8 @@ namespace IFQuantLauncher.Routing
         /// </summary>
         public static Dictionary<string, string> BuildStage2(
             RunRequest request, PanelDef panel, HashSet<string> engineThresholdMarkers,
-            string registryPath, string outputDirectory, string inputDirectory,
+            string registryPath, string engineScriptPath,
+            string outputDirectory, string inputDirectory,
             string autoPanelMapPath, bool previewOnly)
         {
             // R3 fail-closed. Reaching this with route 3 means the UI veto and
@@ -2572,10 +2719,16 @@ namespace IFQuantLauncher.Routing
             Dictionary<string, string> env =
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+            if (string.IsNullOrWhiteSpace(engineScriptPath))
+                throw new InvalidOperationException(
+                    "The modern Fiji engine requires the exact immutable script path so each " +
+                    "run manifest can hash the bytes it executed.");
+
             env["IFQ_INPUT_DIR"] = Path.GetFullPath(inputDirectory);
             env["IFQ_OUTPUT_DIR"] = outputDirectory;
             env["IFQ_PANEL"] = panelKey;
             env["IFQ_MARKER_REGISTRY"] = registryPath;
+            env["IFQ_ENGINE_SCRIPT_PATH"] = Path.GetFullPath(engineScriptPath);
             if (!string.IsNullOrEmpty(autoPanelMapPath))
                 env["IFQ_PANEL_MAP_PATH"] = autoPanelMapPath;
             if (!string.IsNullOrEmpty(request.PanelConfigJson))
@@ -2598,6 +2751,30 @@ namespace IFQuantLauncher.Routing
             // output folder must abort the engine rather than be merged into.
             env["IFQ_ALLOW_NONEMPTY_OUTPUT"] = "false";
             env["IFQ_MORPHOLOGY_PRIMARY"] = "true";
+            // Pin the engine defaults explicitly so the launcher record, the
+            // sharded orchestrator argv and every Fiji shard agree even if the
+            // engine's silent fallbacks change in a later source revision.
+            env["IFQ_STARDIST_PROB"] = "0.5";
+            env["IFQ_STARDIST_NMS"] = "0.4";
+            env["IFQ_STARDIST_TILES"] = "1";
+            bool starDist = string.Equals(
+                request.Segmenter, "stardist",
+                StringComparison.OrdinalIgnoreCase);
+            if (starDist)
+            {
+                if (string.IsNullOrWhiteSpace(request.StarDistModelPath) ||
+                    string.IsNullOrWhiteSpace(request.StarDistRuntimeManifestPath))
+                    throw new InvalidOperationException(
+                        "StarDist requires both the exported .zip model path and the closed " +
+                        "runtime-manifest path. Classic segmentation emits neither path.");
+                env["IFQ_STARDIST_MODEL_PATH"] =
+                    NormalizeStarDistAuthorityFile(
+                        request.StarDistModelPath, ".zip", "StarDist model", 0L);
+                env["IFQ_STARDIST_RUNTIME_MANIFEST"] =
+                    NormalizeStarDistAuthorityFile(
+                        request.StarDistRuntimeManifestPath, ".json",
+                        "StarDist runtime manifest", 1024L * 1024L);
+            }
 
             // H3. Written explicitly on every route that is allowed to write it,
             // so the engine's default of 1 can never apply by omission.
@@ -2645,11 +2822,75 @@ namespace IFQuantLauncher.Routing
                 if (EnvSurface.ProtectedKeys.Contains(item.Key)) continue;
                 env[item.Key] = item.Value;
             }
+            ValidateStarDistEnvironment(env);
             return env;
         }
 
+        private static string NormalizeStarDistAuthorityFile(
+            string value, string extension, string label, long maximumBytes)
+        {
+            if (!Path.IsPathRooted(value))
+                throw new InvalidOperationException(
+                    label + " must use an absolute path.");
+            string path = Path.GetFullPath(value);
+            if (!string.Equals(
+                    Path.GetExtension(path), extension,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    label + " must have a " + extension + " extension.");
+            if (!File.Exists(path))
+                throw new InvalidOperationException(label + " does not exist: " + path);
+            FileAttributes attributes = File.GetAttributes(path);
+            if ((attributes & (FileAttributes.Directory |
+                               FileAttributes.ReparsePoint |
+                               FileAttributes.Device)) != 0)
+                throw new InvalidOperationException(
+                    label + " must be a regular, non-reparse file.");
+            long length = new FileInfo(path).Length;
+            if (length <= 0)
+                throw new InvalidOperationException(label + " must not be empty.");
+            if (maximumBytes > 0 && length > maximumBytes)
+                throw new InvalidOperationException(
+                    label + " exceeds the 1 MiB limit.");
+            return path;
+        }
+
+        private static void ValidateStarDistEnvironment(Dictionary<string, string> env)
+        {
+            double probability;
+            double nms;
+            int tiles;
+            if (!double.TryParse(env["IFQ_STARDIST_PROB"], NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out probability) ||
+                double.IsNaN(probability) || double.IsInfinity(probability) ||
+                probability < 0.0 || probability > 1.0)
+                throw new InvalidOperationException(
+                    "IFQ_STARDIST_PROB must be a finite number between 0 and 1.");
+            if (!double.TryParse(env["IFQ_STARDIST_NMS"], NumberStyles.Float,
+                                 CultureInfo.InvariantCulture, out nms) ||
+                double.IsNaN(nms) || double.IsInfinity(nms) || nms < 0.0 || nms > 1.0)
+                throw new InvalidOperationException(
+                    "IFQ_STARDIST_NMS must be a finite number between 0 and 1.");
+            if (!int.TryParse(env["IFQ_STARDIST_TILES"], NumberStyles.Integer,
+                              CultureInfo.InvariantCulture, out tiles) || tiles < 1)
+                throw new InvalidOperationException(
+                    "IFQ_STARDIST_TILES must be a positive integer.");
+
+            // PowerShell binds the matching orchestrator parameters to numeric
+            // types before comparing them with this sealed environment.  Keep
+            // one invariant textual representation so equivalent user input
+            // such as 0.50, 5e-1 or 01 cannot fail that equality check later.
+            env["IFQ_STARDIST_PROB"] =
+                probability.ToString("R", CultureInfo.InvariantCulture);
+            env["IFQ_STARDIST_NMS"] =
+                nms.ToString("R", CultureInfo.InvariantCulture);
+            env["IFQ_STARDIST_TILES"] =
+                tiles.ToString(CultureInfo.InvariantCulture);
+        }
+
         /// Stage 1 (QuPath) environment for route 2.
-        public static Dictionary<string, string> BuildStage1(RunRequest request, string panelKey)
+        public static Dictionary<string, string> BuildStage1(
+            RunRequest request, string panelKey, string stage1ScriptPath)
         {
             // The same fail-closed guard BuildStage2 has always carried, and for
             // a sharper reason: route 3 is the only route besides 2 that
@@ -2683,6 +2924,11 @@ namespace IFQuantLauncher.Routing
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             env["IFQ_WSI_INPUT"] = Path.GetFullPath(request.WsiInput);
             env["IFQ_WSI_OUTPUT"] = Path.GetFullPath(request.WsiOutput);
+            if (string.IsNullOrWhiteSpace(stage1ScriptPath))
+                throw new InvalidOperationException(
+                    "Stage 1 requires the exact packaged script path so its manifest can hash " +
+                    "the bytes QuPath executed.");
+            env["IFQ_WSI_STAGE1_SCRIPT_PATH"] = Path.GetFullPath(stage1ScriptPath);
             // One panel control writes both names. 'panel' is a grouping key
             // downstream, so a mismatch splits one animal into two rows.
             env["IFQ_WSI_PANEL"] = panelKey;
@@ -2694,6 +2940,9 @@ namespace IFQuantLauncher.Routing
                     request.WsiMaxTilesPerSlide.ToString(CultureInfo.InvariantCulture);
             if (!string.IsNullOrEmpty(request.SlideMetadataCsv))
                 env["IFQ_WSI_SLIDE_METADATA"] = Path.GetFullPath(request.SlideMetadataCsv);
+            if (!string.IsNullOrEmpty(request.WsiReferenceMaskProfile))
+                env["IFQ_WSI_REFERENCE_MASK_PROFILE"] =
+                    Path.GetFullPath(request.WsiReferenceMaskProfile);
 
             foreach (KeyValuePair<string, string> item in
                      FailClosedGate.ParseAdvanced(request.AdvancedText, null))
@@ -3186,7 +3435,9 @@ namespace IFQuantLauncher.Routing
         /// The frozen Fiji engine. Routes 1, 2 and 4 all end up here.
         Stage2Fiji = 2,
         /// aggregate_tiles_to_slide.py. Reads NO IFQ_* variable at all.
-        Stage3Python = 3
+        Stage3Python = 3,
+        /// aggregate_to_mouse.py. Reads NO IFQ_* variable at all.
+        Stage4Python = 4
     }
 
     /// Everything the choke point needs in order to decide, gathered by the
@@ -3206,6 +3457,16 @@ namespace IFQuantLauncher.Routing
         /// The final, merged environment -- after the route forcing, after the
         /// Advanced overlay, after everything.
         public Dictionary<string, string> Environment;
+        /// Exact immutable IF_Quant_Pipeline.groovy path for modern Fiji stages.
+        public string ExpectedEngineScriptPath;
+        /// Exact operator-selected exported StarDist model for modern Stage 2.
+        public string ExpectedStarDistModelPath;
+        /// Exact operator-selected closed StarDist runtime manifest for modern Stage 2.
+        public string ExpectedStarDistRuntimeManifestPath;
+        /// Exact immutable qupath_wsi_tile_export.groovy path for Stage 1.
+        public string ExpectedStage1ScriptPath;
+        /// Exact optional operator-selected reference-mask profile for Stage 1.
+        public string ExpectedReferenceMaskProfilePath;
         public string OutputDirectory;
         /// The names the operator typed into the Advanced box (route 4's nuclei
         /// floor rule needs it).
@@ -3312,12 +3573,17 @@ namespace IFQuantLauncher.Routing
             switch (input.Stage)
             {
                 case LaunchStage.Stage3Python:
-                    CheckStage3(env, route);
+                    CheckAggregationPython(env, route, "stage 3");
+                    frozen = false;
+                    policy = new List<string>();
+                    break;
+                case LaunchStage.Stage4Python:
+                    CheckAggregationPython(env, route, "stage 4");
                     frozen = false;
                     policy = new List<string>();
                     break;
                 case LaunchStage.Stage1QuPath:
-                    CheckStage1(env, input.Request);
+                    CheckStage1(input, env, input.Request);
                     frozen = false;
                     policy = new List<string>();
                     break;
@@ -3336,17 +3602,18 @@ namespace IFQuantLauncher.Routing
         private const string Prefix = "LAUNCH REFUSED. ";
 
         // -------------------------------------------------------------
-        // Stage 3 -- aggregate_tiles_to_slide.py
+        // Stages 3 and 4 -- the two Python aggregators
         // -------------------------------------------------------------
-        private static void CheckStage3(Dictionary<string, string> env, ImageRoute route)
+        private static void CheckAggregationPython(
+            Dictionary<string, string> env, ImageRoute route, string stageName)
         {
             if (route != ImageRoute.IfSlideScanner)
                 throw new InvalidOperationException(
-                    Prefix + "stage 3 exists only on route 2 (IF - slide scanner).");
+                    Prefix + stageName + " exists only on route 2 (IF - slide scanner).");
             List<string> stray = IfqNames(env);
             if (stray.Count > 0)
                 throw new InvalidOperationException(
-                    Prefix + "stage 3 reconciles tiles that stage 2 already measured; it reads " +
+                    Prefix + stageName + " aggregates outputs already measured by stage 2; it reads " +
                     "no IFQ_* variable, and any that is set here would appear in the run record " +
                     "as if it had configured something. Remove: " +
                     string.Join(", ", stray.ToArray()));
@@ -3355,7 +3622,8 @@ namespace IFQuantLauncher.Routing
         // -------------------------------------------------------------
         // Stage 1 -- QuPath tiling
         // -------------------------------------------------------------
-        private static void CheckStage1(Dictionary<string, string> env, RunRequest request)
+        private static void CheckStage1(
+            SealInput input, Dictionary<string, string> env, RunRequest request)
         {
             if (request.Route != ImageRoute.IfSlideScanner)
                 throw new InvalidOperationException(
@@ -3367,10 +3635,44 @@ namespace IFQuantLauncher.Routing
             RequireNonEmpty(env, "IFQ_WSI_OUTPUT",
                 "Stage 1 writes the tiles, the ROI sets and stage1_manifest.json there, and " +
                 "stages 2 and 3 read all three back from it.");
+            RequireNonEmpty(env, "IFQ_WSI_STAGE1_SCRIPT_PATH",
+                "Stage 1 must hash the exact packaged Groovy bytes QuPath executed; without " +
+                "that path its manifest cannot bind itself to the tiling implementation.");
+            string configuredScript = Path.GetFullPath(
+                env["IFQ_WSI_STAGE1_SCRIPT_PATH"]);
+            if (string.IsNullOrWhiteSpace(input.ExpectedStage1ScriptPath) ||
+                !string.Equals(
+                    configuredScript,
+                    Path.GetFullPath(input.ExpectedStage1ScriptPath),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    Prefix + "IFQ_WSI_STAGE1_SCRIPT_PATH does not match the immutable " +
+                    "Stage 1 script path sealed for this launch.");
+
+            string configuredReferenceProfile = Read(
+                env, "IFQ_WSI_REFERENCE_MASK_PROFILE");
+            bool hasConfiguredReferenceProfile = !string.IsNullOrWhiteSpace(
+                configuredReferenceProfile);
+            bool expectsReferenceProfile = !string.IsNullOrWhiteSpace(
+                input.ExpectedReferenceMaskProfilePath);
+            if (hasConfiguredReferenceProfile != expectsReferenceProfile ||
+                (expectsReferenceProfile && !string.Equals(
+                    Path.GetFullPath(configuredReferenceProfile),
+                    Path.GetFullPath(input.ExpectedReferenceMaskProfilePath),
+                    StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException(
+                    Prefix + "IFQ_WSI_REFERENCE_MASK_PROFILE does not match the optional " +
+                    "reference-mask profile path sealed for this Stage 1 launch.");
             RequireNonEmpty(env, "IFQ_WSI_PANEL",
                 "'panel' is a grouping key in every downstream table. Stage 1 stamps it into " +
                 "each tile's samplesheet row before Fiji sees a tile, so a blank one splits " +
                 "one animal into an unnamed group.");
+            string resume = null;
+            if (!env.TryGetValue("IFQ_WSI_RESUME", out resume) ||
+                !string.Equals((resume ?? "").Trim(), "false", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    Prefix + "IFQ_WSI_RESUME must be false until Stage 1 has content-addressed " +
+                    "checkpoints for its source, profile, tissue mask, tile and ROI bytes.");
 
             // One panel control writes both stage names. A stage 1 that tiles
             // under one panel and a stage 2 that measures under another produces
@@ -3407,6 +3709,56 @@ namespace IFQuantLauncher.Routing
 
             PanelDef panel = input.Panel;
             bool legacy = route == ImageRoute.LegacyFiji172;
+            if (!legacy)
+            {
+                RequireNonEmpty(env, "IFQ_ENGINE_SCRIPT_PATH",
+                    "The engine must hash the exact immutable Groovy bytes it executes.");
+                string configuredScript = Path.GetFullPath(env["IFQ_ENGINE_SCRIPT_PATH"]);
+                if (string.IsNullOrWhiteSpace(input.ExpectedEngineScriptPath) ||
+                    !string.Equals(
+                        configuredScript,
+                        Path.GetFullPath(input.ExpectedEngineScriptPath),
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        Prefix + "IFQ_ENGINE_SCRIPT_PATH does not match the immutable engine " +
+                        "path sealed for this launch.");
+
+                bool starDist = string.Equals(
+                    (Read(env, "IFQ_SEGMENTER") ?? "").Trim(),
+                    "stardist", StringComparison.OrdinalIgnoreCase);
+                if (starDist)
+                {
+                    RequireNonEmpty(env, "IFQ_STARDIST_MODEL_PATH",
+                        "StarDist must bind the exact exported .zip model bytes.");
+                    RequireNonEmpty(env, "IFQ_STARDIST_RUNTIME_MANIFEST",
+                        "StarDist must bind the exact plugin/CSBDeep/TensorFlow runtime " +
+                        "artifact bytes and loaded class origins.");
+                    if (string.IsNullOrWhiteSpace(input.ExpectedStarDistModelPath) ||
+                        !string.Equals(
+                            Path.GetFullPath(env["IFQ_STARDIST_MODEL_PATH"]),
+                            Path.GetFullPath(input.ExpectedStarDistModelPath),
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(
+                            Prefix + "IFQ_STARDIST_MODEL_PATH does not match the exact " +
+                            "operator-selected model path sealed for this launch.");
+                    if (string.IsNullOrWhiteSpace(
+                            input.ExpectedStarDistRuntimeManifestPath) ||
+                        !string.Equals(
+                            Path.GetFullPath(env["IFQ_STARDIST_RUNTIME_MANIFEST"]),
+                            Path.GetFullPath(input.ExpectedStarDistRuntimeManifestPath),
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(
+                            Prefix + "IFQ_STARDIST_RUNTIME_MANIFEST does not match the exact " +
+                            "operator-selected runtime manifest sealed for this launch.");
+                }
+                else if (env.ContainsKey("IFQ_STARDIST_MODEL_PATH") ||
+                         env.ContainsKey("IFQ_STARDIST_RUNTIME_MANIFEST"))
+                {
+                    throw new InvalidOperationException(
+                        Prefix + "classic segmentation must not receive StarDist model or " +
+                        "runtime-manifest paths.");
+                }
+            }
 
             // The record names a panel; the environment names a panel. If they
             // are not the same panel the entire channel map in the record is

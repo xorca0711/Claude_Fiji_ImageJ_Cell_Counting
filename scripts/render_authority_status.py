@@ -114,7 +114,7 @@ def validate_contract(payload: Mapping[str, Any]) -> None:
     )
     _require_keys(root, root_keys, "$")
     _require(set(root) == set(root_keys), "$ contains unknown keys")
-    _require(root["schema_version"] == "1.0.0", "unsupported schema_version")
+    _require(root["schema_version"] == "1.1.0", "unsupported schema_version")
     _require(
         root["$schema"] == "../schemas/project-state.schema.json",
         "$schema must reference the repository schema",
@@ -226,9 +226,20 @@ def validate_contract(payload: Mapping[str, Any]) -> None:
     _require(wsi.get("tile_count") == 6, "WSI pilot must record exactly six tiles")
 
     gates = _index_by_id(_require_sequence(root["project_gates"], "$.project_gates"), "$.project_gates")
-    _require("G-CONTRACT-INTEGRATION" in gates, "measurement contract integration gate is required")
-    _require("G-CONFOCAL-DENOMINATOR" in gates, "comparable confocal denominator gate is required")
-    _require("G-SAMPLING-INFERENCE" in gates, "sampling and inference gate is required")
+    expected_gates = {
+        "G-CONTRACT-INTEGRATION": "ENGINEERING_COMPLETE",
+        "G-CONFOCAL-DENOMINATOR": "OPEN_SCIENTIFIC_BLOCKER",
+        "G-SAMPLING-INFERENCE": "OPEN_SCIENTIFIC_BLOCKER",
+        "G-HE-VALIDATION": "OPEN_SCIENTIFIC_BLOCKER",
+        "G-WSI-VALIDATION": "OPEN_SCIENTIFIC_BLOCKER",
+        "G-SEGMENTATION-VALIDATION": "OPEN_SCIENTIFIC_BLOCKER",
+    }
+    _require(set(gates) == set(expected_gates), "project gates must contain the complete authoritative gate set")
+    for gate_id, expected_status in expected_gates.items():
+        _require(
+            gates[gate_id].get("status") == expected_status,
+            f"{gate_id} must have status {expected_status}",
+        )
 
     validate_privacy(root)
 

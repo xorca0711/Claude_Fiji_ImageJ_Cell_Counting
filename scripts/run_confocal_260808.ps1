@@ -36,6 +36,7 @@ Copy-Item -LiteralPath $panelMap -Destination "$out\panel_map.csv"
 
 $env:IFQ_INPUT_DIR      = $data
 $env:IFQ_OUTPUT_DIR     = "$out\analysis"
+$env:IFQ_ENGINE_SCRIPT_PATH = "$repo\IF_Quant_Pipeline.groovy"
 $env:IFQ_RECURSIVE      = "true"
 # IFQ_INCLUDE_REGEX is a FULL match against the ABSOLUTE PATH. Without it,
 # recursive discovery also picks up the 288 4x navigation fields, which are not

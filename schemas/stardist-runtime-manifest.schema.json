@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xorca0711/IFQuant-Lung/schemas/stardist-runtime-manifest.schema.json",
+  "title": "IFQuant StarDist runtime manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "role": { "const": "stardist_plugin" },
+              "expected_classes": {
+                "allOf": [
+                  { "contains": { "const": "de.csbdresden.stardist.StarDist2D" } },
+                  { "contains": { "const": "de.csbdresden.stardist.StarDist2DNMS" } }
+                ]
+              }
+            },
+            "required": ["role", "expected_classes"]
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": { "const": "csbdeep_plugin" },
+              "expected_classes": {
+                "contains": {
+                  "const": "de.csbdresden.csbdeep.commands.GenericNetwork"
+                }
+              }
+            },
+            "required": ["role", "expected_classes"]
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": { "const": "tensorflow_java" },
+              "expected_classes": {
+                "contains": { "const": "org.tensorflow.Graph" }
+              }
+            },
+            "required": ["role", "expected_classes"]
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": { "const": "tensorflow_native" }
+            },
+            "required": ["role"]
+          },
+          "minContains": 1
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "path",
+        "size_bytes",
+        "sha256",
+        "expected_classes"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

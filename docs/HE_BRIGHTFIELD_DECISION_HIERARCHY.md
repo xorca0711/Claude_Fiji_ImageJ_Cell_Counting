@@ -2,8 +2,9 @@
 
 > **Status: R1 IMAGE QC APPROVED / H4-H7 DEVELOPMENT.** The 2026-08-12
 > four-mouse/eight-section cohort has a reviewer-approved stain/tissue/artifact
-> denominator through H3. Lesion, ordinal, mouse, and multimodal endpoints remain
-> review-gated and Route 3 remains disabled.
+> denominator through H3. The fail-closed H7/H8 review-aggregation engineering
+> gate is implemented, but the real ordinal, mouse, and multimodal outputs remain
+> blocked on a complete accepted review. Route 3 remains disabled.
 
 ## 1. Scope
 
@@ -32,6 +33,10 @@ Source: `<LOCAL_HE_DATA>`
 The exact mapping is in
 `config/studies/g_surf_he_20260812.json`. A future preflight command must reject
 a slide rather than guess when the declared series count or identity differs.
+The same study contract is the default authority for the exact approved R1 and
+development H4 package roots. The H&E tooling performs no run-root discovery or
+recency selection; an alternate package is used only through an explicit CLI
+override and must still satisfy the locked package hashes.
 
 ## 3. Decision hierarchy
 
@@ -108,14 +113,34 @@ provenance and original versus final masks.
 
 ### H8 — mouse aggregation
 
-Two sections from one slide remain technical samples. Pool quantitative
-fractions from their raw components:
+Two sections from one slide remain technical samples. For ordinal review
+scores, retain both ordered section values plus their observed minimum,
+maximum, and exact agreement. Do not average, sum, weight, or otherwise create
+a scalar ordinal composite.
+
+For a future quantitative fraction, pool its raw components:
 
 `mouse_fraction = sum(section_numerators) / sum(section_denominators)`
 
 Never average section fractions and never report `n=8`. Report between-section
-agreement as QC. Missing sections, denominator mismatch or incomplete artifact
-review blocks the mouse summary.
+agreement as QC. A missing review row blocks publication; a completed but
+nonreviewable section remains explicitly non-evaluable and is not coerced to
+zero. Denominator mismatch or incomplete artifact review continues to block
+future quantitative summaries.
+
+The implemented command is:
+
+```powershell
+python .\scripts\he_pipeline.py aggregate-review `
+  --review-csv <completed-H7_SECTION_PATHOLOGY_REVIEW.csv> `
+  --output-root <new-empty-output-path>
+```
+
+It validates the locked blinded table in full before using the study map,
+eligibility-checks measured schema-v2 `he_pathology` section records at the
+`observed_units` estimand, publishes through a staging directory, refuses an
+existing destination, and writes the hash audit last. This is an engineering
+capability, not evidence that the current biological review has been completed.
 
 ### H9 — multimodal association
 
@@ -169,9 +194,11 @@ qc/<section>__compartment_overlay.png
 qc/<section>__lesion_overlay.png
 ```
 
-Every summary carries `study_id`, `mouse_id`, `slide_id`, `section_id`, physical
-units, classifier/profile versions, review state and exploratory/confirmatory
-status. The mouse summary is emitted only when the declared section set is
+Every summary carries the applicable study, mouse, section, scale/profile,
+review-state, and provenance fields. The ordinal review package uses
+`he_section_pathology_scores.csv`, `he_mouse_pathology_summary.csv`,
+`he_technical_section_agreement.csv`, schema-v2 measurement JSONL, and a final
+audit ledger. It is emitted only when the declared blinded section set is
 complete and every required review gate passes.
 
 ## 6. Validation ladder before Route 3 can be enabled

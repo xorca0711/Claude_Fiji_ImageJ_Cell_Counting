@@ -23,12 +23,16 @@ file URIs anywhere in the authority payload.
 
 ## Interpretation rule
 
-An engineering state does not promote a scientific claim. The settled confocal
+An engineering-complete gate does not promote a scientific claim. It means the
+repository implementation, contracts, and executable rejection tests are in
+place; deployment-fixture replay and expert or biological review remain separate
+promotion checks. The settled confocal
 CSV release records 80 quantified fields, but one included field has a
 whole-field tissue-denominator override that is not scientifically comparable
 with the usual auto-DAPI denominators. The release therefore remains a
 descriptive selected-field artifact with an explicit comparability exception.
-H&E H0-H3 and the six-tile WSI pilot remain engineering or image-QC work only.
+H&E and WSI remain engineering or image-QC work only even where their review,
+provenance, and aggregation mechanics are complete.
 
 If prose elsewhere conflicts with the JSON, resolve the discrepancy explicitly;
 do not silently weaken a limitation or infer a scientific promotion from an

@@ -1,17 +1,25 @@
 # Whole-Slide (WSI) Tiling Workflow
 
-> **Status: VALIDATED (plumbing) / PROPOSED (thresholds).**
+> **Status: ENGINEERING-VALIDATED (plumbing and provenance) / BIOLOGICALLY
+> UNVALIDATED (reference masks and thresholds).**
 >
 > * The Stage 1 → 2 → 3 chain is validated end to end on real data: exported
 >   tiles bit-identical to the source region, ROI areas exact, summed region
 >   areas reconciling to 2.1e-16. The evidence table is section 10.
+> * Prospective Stage 1 runs now bind the exact Bio-Formats source package,
+>   Stage 1 script, global analysis raster, tile/ROI bytes, and complete
+>   candidate ledger. Stage 2 re-hashes that evidence before publication.
+> * A real-slide capped smoke has exercised both the automatic DAPI engineering
+>   raster and an explicit tissue-minus-airway profile. This validates the
+>   software contract, not either mask as a biological reference standard.
 > * **No threshold in this document is calibrated for slide-scanner data.**
 >   `IFQ_KRT5_THRESHOLD = 300` was derived from *confocal* controls and **does
 >   not transfer** — see section 10.
-> * **This route has not been run on the current study data.** The confocal
->   route was used instead. The 6-tile pilot is what validated the plumbing.
+> * **No uncapped, complete analytical WSI run exists for the current study.**
+>   The six-tile run and the capped real-slide runs are engineering evidence
+>   only.
 >
-> Last checked against the relocated local run inventory: 2026-08-25.
+> Last checked against the relocated local run inventory: 2026-08-26.
 
 This document describes the slide-scanner route: quantifying an Olympus VS200
 `.vsi` whole-slide scan with the **unchanged** validated Fiji engine.
@@ -46,6 +54,8 @@ Stage 1   qupath_wsi_tile_export.groovy   .vsi  -> tiles/*.ome.tif
           (QuPath 0.7 headless)                 + tiles/*.ome_RoiSet.zip
                                                 + tiles/samplesheet.csv
                                                 + tile_manifest.csv
+                                                + tile_candidate_manifest.csv
+                                                + reference_space/*
                                                 + stage1_manifest.json
 
 Stage 2   IF_Quant_Pipeline.groovy        tiles -> run_summary.csv
@@ -157,6 +167,28 @@ The global mask is computed **once per slide**, not per tile. Per-tile Otsu
 would use a different threshold in every tile — a tile that is 95% airspace and
 one that is 95% tissue would get wildly different cutoffs.
 
+Stage 1 has two explicit reference-space modes:
+
+1. With `IFQ_WSI_REFERENCE_MASK_PROFILE` blank, Stage 1 constructs one global
+   DAPI/Otsu raster. It is always labelled `engineering_unreviewed`, explicitly
+   records that airway exclusion is unavailable, and publishes the exact final
+   raster under `reference_space/` for later re-hashing.
+2. With `IFQ_WSI_REFERENCE_MASK_PROFILE` set, the closed JSON profile must
+   identify every input slide by filename, exact Bio-Formats source-package
+   SHA-256, selected series, full-resolution dimensions, downsample grid, and
+   exact tissue/airway mask size and SHA-256. Both masks must be 8-bit binary
+   images containing only 0 and 255, and airway foreground must be a subset of
+   tissue foreground. The analysis raster is the exact pixelwise result
+   `tissue AND NOT airway`; Stage 1 does not blur or morphologically alter an
+   externally supplied reference mask.
+
+The profile schema is
+[`schemas/wsi-reference-mask-profile.schema.json`](../schemas/wsi-reference-mask-profile.schema.json).
+The allowed `review_state` values describe provenance only. Writing
+`expert_reviewed` does not prove review occurred, validate airway annotations,
+or authorize a scientific endpoint; review evidence remains an external
+promotion gate.
+
 ## 6. Stage 1 — settings
 
 | Variable | Default | Meaning |
@@ -166,8 +198,9 @@ one that is 95% tissue would get wildly different cutoffs.
 | `IFQ_WSI_SLIDE_METADATA` | *(none)* | CSV: `vsi_filename,mouse_id,genotype,condition`. Overrides filename parsing. |
 | `IFQ_WSI_CORE_PX` | `2048` | core tile size (706 µm at 0.345 µm/px) |
 | `IFQ_WSI_HALO_PX` | `128` | overlap per side (44 µm, >2 cell diameters) |
-| `IFQ_WSI_MIN_TILE_TISSUE_UM2` | `2000` | skip tiles with less core tissue than this |
+| `IFQ_WSI_MIN_TILE_TISSUE_UM2` | `0` | analytical default: omit no tissue-bearing grid core; a positive value makes coverage incomplete and is rejected downstream |
 | `IFQ_WSI_TISSUE_DOWNSAMPLE` | `16` | tissue detection resolution — **pin this** |
+| `IFQ_WSI_REFERENCE_MASK_PROFILE` | *(none)* | optional closed JSON contract for exact external tissue and airway masks; blank selects the automatic DAPI/Otsu engineering raster |
 | `IFQ_WSI_TISSUE_BLUR_SIGMA` | `2.0` | in downsampled px |
 | `IFQ_WSI_TISSUE_CLOSE_RADIUS` | `4.0` | morphological closing |
 | `IFQ_WSI_TISSUE_OPEN_RADIUS` | `2.0` | morphological opening |
@@ -175,15 +208,38 @@ one that is 95% tissue would get wildly different cutoffs.
 | `IFQ_WSI_FILL_INTERIOR_RINGS` | `false` | **fills airspace — see section 5** |
 | `IFQ_WSI_MAX_PIXEL_UM` | `0.5` | reject coarser series |
 | `IFQ_WSI_EXPECT_CHANNELS` | `4` | required channel count |
+| `IFQ_WSI_ORDERED_CHANNEL_PATTERNS` | DAPI; 488/FITC; 555/Cy3; 647/Cy5 patterns | exactly one semicolon-delimited, full-match regular expression per acquired channel, in order |
 | `IFQ_WSI_COMPRESSION` | `ZLIB` | lossless. `J2K_LOSSY`/`JPEG` are refused. |
 | `IFQ_WSI_PANEL` | `LEFT` | written into `samplesheet.csv` |
 | `IFQ_WSI_ROI_NAME` | `alveolar_core` | ROI/region name — **see section 7** |
-| `IFQ_WSI_RESUME` | `true` | skip tiles already written |
+| `IFQ_WSI_RESUME` | `false` | must remain false; resume is refused until a content-addressed Stage 1 checkpoint exists |
 | `IFQ_WSI_MAX_TILES_PER_SLIDE` | `0` | smoke-test cap; records `coverage_complete=false` |
 
+`IFQ_WSI_OUTPUT` must be new or empty. Stage 1 refuses every pre-existing
+entry because an existence-only resume cannot prove that source, script,
+tissue mask, configuration, tile, and ROI bytes still belong together. Every
+grid core is written to `tile_candidate_manifest.csv`, including cores outside
+tissue and any low-tissue, empty-raster, dry-run, exported, or resumed status.
+The current analytical path accepts only exhaustive, uncapped, non-dry runs
+with zero low-tissue and empty-raster omissions.
+
+The source `.vsi` plus every Bio-Formats-discovered companion file are hashed as
+one sorted package ledger before export and checked again before the final
+manifest. The Stage 1 script and every published reference-space artifact are
+also captured before use and re-verified before publication. A same-name file,
+relocated checkout, or edited mask cannot inherit authority from an earlier
+run.
+
+The ordered patterns validate acquisition metadata labels and position only.
+They do not infer that a 488/FITC channel contains KRT5, for example; biological
+marker identity still comes from the frozen acquisition protocol and explicit
+panel mapping.
+
 ```powershell
-$env:IFQ_WSI_INPUT  = "D:\Confocal_Images\20260806_CW\20260806_CW"
+$env:IFQ_WSI_INPUT  = "D:\Microscopy_Images\20260806_CW_Slidescanner\20260806_CW"
 $env:IFQ_WSI_OUTPUT = "D:\IFQ_Runs\<run_name>"
+# Optional only after a profile and both masks have been prepared and reviewed:
+# $env:IFQ_WSI_REFERENCE_MASK_PROFILE = "<reviewed-profile>.json"
 & "X:\QuPath\QuPath-0.7.0 (console).exe" script .\qupath_wsi_tile_export.groovy
 ```
 
@@ -254,9 +310,11 @@ aborts the batch. Use `scripts/Invoke-Stage2Sharded.ps1` to split the tile
 folder into N hard-linked shards (hard links cost no disk) and run N Fiji
 processes. After all processes finish, the launcher writes a content-addressed
 `stage2_run_index.json`. It binds every shard's samplesheet, exit status,
-manifest, summary, tile/ROI hashes, run-manifest configuration, engine hash,
-and declared ordered channel signature. Stage 3 reads only those declared
-summaries. A sibling retry, partial output, or stale summary is never guessed.
+manifest, summary, tile/ROI and candidate-ledger hashes, exact per-image
+parameter records, normalized runtime profile, external configuration bytes,
+engine hash, and declared ordered channel map. Stage 3 reads only those
+declared summaries. A sibling retry, partial output, or stale summary is never
+guessed.
 Before launch, the orchestrator writes a content-addressed engine snapshot and
 executes every shard from it. Read handles deny mutation of that snapshot,
 Stage 1 manifests, samplesheets, tiles, and ROIs until the validated index is
@@ -267,28 +325,34 @@ partitioned tile may legitimately emit both damaged and intact region rows.
 Duplicate protection instead uses `(section_id, region, panel)`, so a retry
 cannot evade detection merely by changing `output_key`.
 
-For an unsharded run, create the same index explicitly:
+For a one-process run, use the same orchestrator with one shard; it creates and
+locks the required content-addressed configuration snapshots before Fiji reads
+them:
 
 ```powershell
-python .\scripts\build_stage2_run_index.py `
-  --slide-dir '<run>\<slide>' `
-  --stage1-manifest '<run>\stage1_manifest.json' `
-  --stage2-script '.\IF_Quant_Pipeline.groovy' `
-  --run 'analysis' 'tiles\samplesheet.csv' 0
+.\scripts\Invoke-Stage2Sharded.ps1 `
+  -TilesDir '<run>\<slide>\tiles' `
+  -OutputRoot '<run>\<slide>' `
+  -Shards 1 `
+  -Krt5Threshold '<calibrated>' `
+  -AgerThreshold '<calibrated>' `
+  -T1aThreshold '<calibrated>'
 ```
 
-The index's channel signature is the ordered mapping declared by the panel
-configuration. It does not yet prove that acquisition metadata labels match
-that mapping; exact source-metadata verification remains an open gate. The
-current cross-slide profile also does not bind external panel/registry file
-bytes, per-image `__params.json` snapshots, or a normalized
-ImageJ/Bio-Formats/Java runtime signature. Built-in-panel mechanics are covered;
-custom-panel and scientific cohort promotion require those additional hashes.
-Built-in acquisition labels are normalized to their summary IDs (for example,
-`Pro-SPC-488` to `PROSPC` and `T1alpha-647` to `T1A`). An arbitrary custom
-`fileLabel` alias still needs structured marker metadata; until that exists, the
-index also cannot safely classify every populated marker-like derived column as
-declared or undeclared.
+The index checks the acquisition metadata labels against the ordered Stage 1
+patterns and separately binds the structured marker IDs and file labels from
+each exact `__params.json`. It verifies external marker-registry/custom-panel
+snapshot bytes and compares normalized ImageJ/Bio-Formats/Java identities across
+shards. Per-image parameter and source hashes remain observation-specific; they
+are bound and propagated without making otherwise identical slides appear to
+use different measurement profiles.
+
+This still does not prove biological stain identity: a metadata label such as
+`FITC` cannot prove that the channel contains KRT5. The raw VSI package, Stage 1
+script, configuration, reference raster, and downstream artifacts are now
+content-bound. What remains before scientific promotion is biological:
+reviewed tissue/airway masks, modality-specific threshold and endpoint
+calibration, uncapped complete runs, and an adequate mouse-level design.
 
 ## 8. Stage 3 — reconciliation
 
@@ -296,6 +360,33 @@ declared or undeclared.
 python .\aggregate_tiles_to_slide.py --slide-root D:\IFQ_Runs\<run_name>
 python .\aggregate_to_mouse.py D:\IFQ_Runs\<run_name>\stats\slide_level_summary.csv
 ```
+
+Each successful aggregation is a three-part publication rather than a bare
+CSV. Stage 3 atomically writes `slide_level_summary.csv`, then publishes
+`slide_level_summary.audit.json` last. The audit binds the exact Stage 3 and
+complete repository-owned Python import closure, Stage 1 manifest, Stage 2
+engine and indexes, indexed summaries, run manifests, any cell tables used for
+seam diagnostics,
+the canonical output bytes, arguments, Python runtime, and UTC completion time.
+Stage 4 likewise writes its mouse/group CSVs atomically and publishes
+`mouse_group_aggregation.audit.json` last (with an `endpoint_` prefix for an
+endpoint run). Aggregation-audit contract 1.1 requires the exact reviewed
+role-to-repository-path code set, including package initializers and transitive
+IFQuant helpers; missing, extra, moved, or changed sources fail closed. A WSI
+Stage 4 run requires and revalidates the sibling Stage 3
+audit; a direct-confocal `run_summary.csv` retains its established route and
+does not pretend to have a Stage 3 record. Any declared artifact drift makes
+validation fail closed and prevents a current audit from being published.
+
+With a reviewed `area_wsi` mapping, Stage 4 may also receive
+`--measurement-record-spec` and publish `measurement_records.jsonl`. Before
+mouse pooling, it reconstructs each declared ratio from the exact slide-level
+additive columns, calls the shared batch-eligibility contract, and cross-checks
+the specification's profile/config/script hashes and ordered channel labels
+against the Stage 2 lineage carried by Stage 3. Endpoint names and reference
+spaces are never derived from column suffixes. The complete specification and
+fail-closed behavior are documented in
+[`MEASUREMENT_RECORD_INTEGRATION.md`](MEASUREMENT_RECORD_INTEGRATION.md).
 
 Stage 3 exists mainly to make silent loss impossible. It **refuses** to write
 `slide_level_summary.csv` when:
@@ -308,8 +399,8 @@ Stage 3 exists mainly to make silent loss impossible. It **refuses** to write
 * an additive measurement is non-finite or only partly missing within a panel;
 * an emitted additive marker column is blank for a panel whose indexed channel
   signature declares that marker (a measured zero must be written as `0`);
-* Stage 1 omitted a low-tissue candidate before `tile_manifest.csv`, or did not
-  record that count;
+* Stage 1 lacks a complete candidate ledger, resumed an unbound tile, or omitted
+  any low-tissue/empty-raster candidate;
 * a tile in `tile_manifest.csv` has no `run_summary.csv` row;
 * `sum(region_area_um2)` differs from the Stage 1 core tissue area by >1%
   (which means the `_RoiSet.zip` files were not picked up);
@@ -328,11 +419,13 @@ indexed panel signature may remain blank through mouse/group output rather than
 becoming false zeros; blankness alone is never used to infer that absence.
 
 The 2026-08-25 run-root inventory found five WSI Stage 1 layouts and no complete
-whole-slide analytical run: all five record `coverage_complete=false`. The two
-Stage 2/3 layouts are engineering fixtures only. One contains six tiles and
-seven legitimate region rows; another contains an orphan partial retry beside
-the complete retry. Those layouts motivated the index rules but do not become
-scientific evidence by being indexable.
+whole-slide analytical run: all five record `coverage_complete=false` and
+predate the new candidate/channel evidence. The two Stage 2/3 layouts are
+engineering fixtures only. One contains six tiles and seven legitimate region
+rows; another contains an orphan partial retry beside the complete retry. Those
+layouts motivated the index rules and are expected to fail the prospective
+index contract; they do not become scientific evidence by being technically
+readable.
 
 Pooling reuses `aggregate_to_mouse.classify_columns()` so slide-level and
 mouse-level aggregation cannot drift. Fractions are always recomputed from
@@ -365,6 +458,10 @@ The plumbing is verified end to end on real data (QuPath 0.7.0, Fiji/ImageJ
 | Z handling on single-plane tiles | `range=1:1 projection=max source=single_slice_input` (no ZProjector) |
 | seam count inflation | 22 duplicate pairs / 6215 cells = **0.35%** |
 | full chain to `aggregate_to_mouse.py` | 6 tile rows -> 1 slide row -> 1 mouse, `n_mice=1` |
+| prospective raw source authority | exact Bio-Formats used-file package and Stage 1 script hashed before and after export |
+| automatic reference-space smoke | real M2 series 2 (`59465 x 41119`, 4 channels, 0.345 µm/px); published `3717 x 2570` DAPI engineering raster re-hashed successfully |
+| external reference-space smoke | exact profile/tissue/airway bytes accepted; binary/subset logic reconciled `2,954,901` tissue pixels, `0` airway pixels, and `2,954,901` analysis pixels |
+| Stage 2 reference-space validation | profile, source-mask, final-mask, dimensions, area, review state, and source-package identity revalidated; mask tampering rejected |
 
 That last row is the point: the tile count never becomes the n.
 
@@ -382,6 +479,7 @@ and reported 4.95% KRT5⁺, indistinguishable from an infected animal. Confocal
 removing that floor is the whole reason the calibration became possible. A
 slide-scanner threshold must be derived from slide-scanner controls.
 
-**No study data has been through this route.** The 6-tile pilot above validated
-the machinery; the 2026-08-06 `.vsi` slides were superseded by the 2026-08-08
-confocal acquisition before a full slide run happened.
+**No complete study endpoint has been produced by this route.** The six-tile
+pilot and the capped 2026-08-26 M2 smokes validate machinery and provenance.
+They do not replace an uncapped run, reviewed airway exclusions, scanner-specific
+threshold calibration, or biological validation.

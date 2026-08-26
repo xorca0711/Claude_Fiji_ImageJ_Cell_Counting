@@ -1,12 +1,14 @@
 # IF Quant Windows launcher
 
-`IFQuantLauncher-v1.9.5.exe` is a Windows Forms front end for the analysis
+`IFQuantLauncher-v1.9.7.exe` is a Windows Forms front end for the analysis
 pipeline. It embeds the exact Groovy engine, marker registry, QuPath tiling
-script and Python reconciliation script present at build time. **It does not
-reimplement image analysis.** Every number it produces comes from
-`IF_Quant_Pipeline.groovy`, which is frozen.
+script, sharded Stage 2 orchestrator, Python modules and schemas present at
+build time. **It does not reimplement image analysis.** Pixel/object marker
+measurements come from the frozen `IF_Quant_Pipeline.groovy`; Route 2 tissue
+geometry comes from the packaged QuPath script, and its derived slide/mouse/
+group rollups come from the packaged Python aggregators.
 
-## What the four routes replaced (introduced v1.8.0; current source v1.9.5)
+## What the four routes replaced (introduced v1.8.0; current source v1.9.7)
 
 v1.7.2 assumed one kind of input: a folder of confocal/field images measured by
 Fiji. v1.8.0 makes the *kind of image* an explicit first choice, because the
@@ -25,13 +27,15 @@ refuses to start a run it cannot describe.
 | # | Route | Tools | Produces |
 |---|---|---|---|
 | 1 | **IF — confocal / field images** | Fiji only | `run_summary.csv` (+ `.xlsx`, `run_manifest.json`), one row per (image, region) |
-| 2 | **IF — slide scanner (`.vsi` whole slide)** | QuPath → Fiji → Python | tiles → per-tile measurements → `stats/slide_level_summary.csv` |
+| 2 | **IF — slide scanner (`.vsi` whole slide)** | QuPath → Fiji → Python | tiles → per-tile measurements → slide, mouse, and group CSV summaries |
 | 3 | **H&E / brightfield** | — | **not available in this build** |
 | 4 | **Fiji-only legacy mode** | Fiji only | byte-for-byte the v1.7.2 environment and command line |
 
 **Route 2 is the important architectural point.** QuPath reads and tiles the
-slide; the *same* frozen Fiji engine measures the tiles; stage 3 reconciles
-tiles back to one slide. QuPath never measures anything. The handoff is
+slide; the *same* frozen Fiji engine measures the tiles; stages 3 and 4
+reconcile tiles to slides and then to mouse/group summaries. QuPath defines
+the tissue/tiling geometry and tissue-area denominator; it does not measure
+marker positivity. The handoff is
 file-based because the two applications ship incompatible Java versions
 (Chiaruttini et al. 2022, *Front Comput Sci* 3:780026).
 
@@ -39,6 +43,95 @@ Route 2 also **hard-blocks** an omitted threshold. Routes 1 and 4 only flag it.
 The difference is deliberate: a field run with adaptive thresholds is a
 defensible exploratory measurement, whereas a slide run silently re-derives a
 threshold on each of ~370 tiles, which is not one measurement at all.
+
+Version 1.9.6 requires a fresh Stage 1 output, keeps resume disabled,
+checks the ordered acquisition-channel labels, and exposes the engine's
+probability, NMS, and tile-count StarDist settings. These are integrity and
+configuration controls; by themselves they do not validate a StarDist model
+or establish biological channel identity.
+
+Version 1.9.7 completes that route end to end. The launcher leaves the chosen
+Stage 1 root absent (or verifies that it is empty), lets QuPath create it, then
+reads only the manifest-declared `slide_stem` values. Each value must be a
+unique direct child name and its slide folder must contain `tiles/`,
+`tiles/samplesheet.csv`, `tile_manifest.csv`, and
+`tile_candidate_manifest.csv`. For every declared slide, the launcher invokes
+the packaged `scripts/Invoke-Stage2Sharded.ps1` with the sealed Stage 2
+environment and requires `stage2_run_index.json`. Only after every slide has an
+index does it invoke Stage 3 once, explicitly binding the Stage 1 manifest and
+the packaged Stage 2 engine. It then invokes the packaged Stage 4 aggregator.
+Terminal success requires `stats/slide_level_summary.csv`,
+`stats/mouse_level_summary.csv`, `stats/group_level_summary.csv`, and one
+published index per declared slide.
+
+The **Dry** tier is a Stage 1-only smoke test: after QuPath publishes a manifest
+whose every declared slide has `dry_run=true`, `coverage_complete=false`, and
+`n_written=0`, the launcher stops before Stages 2-4 and does not offer any
+summary for aggregation. It still performs the packaged
+Python/Fiji/PowerShell preflight and therefore requires the complete Route 2
+toolchain; this catches a broken workstation setup before a later quantitative
+run rather than treating Dry as a QuPath-only installation check. Slide metadata
+is also required because Stage 1 itself validates it in Dry mode.
+
+The embedded runtime is published to a content-addressed directory through a
+unique staging tree and one atomic rename. Existing bundles are never repaired
+or overwritten: every expected byte and path is validated, reparse points and
+hard links are rejected, and each expected file is held against write/delete
+for the launcher lifetime. The launcher revalidates exact directory membership
+after acquiring those file leases; it does not rely on that enumeration as a
+filesystem ACL. Closing or cancelling during Route 2 latches cancellation between
+stages and terminates the current Windows Job Object; the launcher closes only
+after the kernel reports that the job contains zero active processes.
+
+### Optional Route 2 external reference masks
+
+`Reference-mask profile JSON` is optional and is propagated only to QuPath
+Stage 1 as `IFQ_WSI_REFERENCE_MASK_PROFILE`. Blank deliberately selects the
+automatic DAPI/Otsu engineering mask. In that mode airway exclusion is not
+available, and neither the launcher nor the Stage 1 manifest claims an
+independently validated anatomical reference.
+
+When a profile is selected, the launcher requires an absolute, readable,
+regular non-reparse `.json` file whose root is an object. Stage 1 remains the
+authority for the closed profile contract, slide/package/series/grid identity,
+and the exact profile, tissue-mask and airway-mask bytes. An external profile
+or an `expert_reviewed` declaration is provenance; it does not by itself prove
+biological validity. The packaged runtime includes
+`schemas/wsi-reference-mask-profile.schema.json` for inspection.
+
+### Explicit StarDist model and runtime authority
+
+Modern Route 1 or Route 2 runs with `Nucleus detection = stardist` require both
+an exported `.zip` model and `stardist-runtime-manifest.schema.json`-conformant
+JSON manifest. The launcher refuses blank, relative, missing, reparse-point or
+wrong-extension paths; it caps the manifest at 1 MiB and checks its closed
+top-level envelope before launch. It emits `IFQ_STARDIST_MODEL_PATH` and
+`IFQ_STARDIST_RUNTIME_MANIFEST` only for StarDist. Classic segmentation emits
+neither key, even when saved path values remain in the hidden fields.
+
+The Fiji engine is the content authority: it verifies the model, manifest and
+every declared StarDist/CSBDeep/TensorFlow artifact by size and SHA-256, checks
+that required runtime classes were loaded from the declared files, and verifies
+the content again after analysis. The Route 2 sharder copies the complete
+launcher-sealed `IFQ_*` environment into every shard, so both exact paths reach
+each engine process. It also accepts the same paths explicitly for direct use:
+
+```powershell
+.\scripts\Invoke-Stage2Sharded.ps1 `
+  -TilesDir <tiles> -OutputRoot <slide-root> -Segmenter stardist `
+  -StarDistModelPath <exported-model.zip> `
+  -StarDistRuntimeManifest <stardist-runtime.json>
+```
+
+Both parameters are required for `stardist` and forbidden for `classic`. The
+sharder reconciles explicit parameters with launcher-inherited values exactly,
+holds both files against write/delete until index publication, and injects them
+into every shard. Manifest-declared runtime artifacts remain verified by the
+engine. Route 4 cannot represent the new keys without ceasing to be the exact
+v1.7.2 environment, so Route 4 + StarDist is refused; use classic there or a
+modern route for content-bound StarDist. These controls establish runtime
+provenance, not model accuracy, segmentation performance or scientific suitability. See
+`docs/STARDIST_RUNTIME.md` for the manifest contract and preparation workflow.
 
 ### Route 3 is visible and deliberately unselectable
 
@@ -118,8 +211,8 @@ self-test and never ran it.)
 Artifacts are written to the repository root and are **not committed** —
 `.exe` and its `.sha256.txt` sidecar belong in GitHub Releases:
 
-- `IFQuantLauncher-v1.9.5.exe`
-- `IFQuantLauncher-v1.9.5.sha256.txt`
+- `IFQuantLauncher-v1.9.7.exe`
+- `IFQuantLauncher-v1.9.7.sha256.txt`
 
 The build prints the SHA-256 of the exe and of each embedded artefact, so a
 shipped binary can be traced to the exact engine it carries.
@@ -133,8 +226,15 @@ closed instead of producing a plausible but uncalibrated bar.
 
 - Windows ARM64 or x64 with .NET Framework 4.x
 - Fiji with Bio-Formats and the plugins for the selected segmentation mode
-- QuPath 0.7+ for route 2 only
-- Python 3 for route 2 stage 3 only
+- for StarDist: an exported `.zip` model plus a closed runtime manifest for the
+  exact StarDist, CSBDeep and TensorFlow artifacts loaded by that Fiji
+- QuPath 0.7+ console executable for route 2 only
+- Python 3.10+ for route 2 index validation and Stages 3-4
+- Windows PowerShell 5.1 for route 2's authoritative sharded orchestrator
+- Fiji's bundled `java.exe` and `ij1-patcher-*.jar`; route 2 forces this path
+- Route 2 `tiles` and slide output on the same hard-link-capable Windows volume
+- a new absent or empty Stage 1 result root; multi-slide inputs use one panel
+  and one sealed measurement profile for every manifest-declared slide
 - images reachable through a local, mapped, or network folder
 
 ## Panel assignment
@@ -160,8 +260,9 @@ appearance.
 
 ## Aggregation is not optional
 
-Every route produces per-image or per-tile rows. Those are **not** the
-statistical unit. Run `aggregate_to_mouse.py` before any test; n = mice.
+Per-image or per-tile rows are **not** the statistical unit. Route 2 now runs
+the packaged mouse/group aggregation as its required Stage 4. For the other
+routes, run `aggregate_to_mouse.py` before any test; n = mice.
 
 ## Released binary vs a build from HEAD
 

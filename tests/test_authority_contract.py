@@ -32,7 +32,7 @@ class AuthorityContractTests(unittest.TestCase):
         self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertEqual(schema["type"], "object")
         self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(schema["properties"]["schema_version"]["const"], "1.0.0")
+        self.assertEqual(schema["properties"]["schema_version"]["const"], "1.1.0")
         self.assertTrue(
             {
                 "authority",
@@ -134,7 +134,12 @@ class AuthorityContractTests(unittest.TestCase):
         self.assertEqual(modalities["wsi_threshold_pilot"]["tile_count"], 6)
         self.assertEqual(modalities["wsi_threshold_pilot"]["status"], "ENGINEERING_PILOT_ONLY")
         gates = {item["id"]: item for item in self.authority["project_gates"]}
-        self.assertEqual(gates["G-CONTRACT-INTEGRATION"]["status"], "OPEN_ENGINEERING_GATE")
+        self.assertEqual(gates["G-CONTRACT-INTEGRATION"]["status"], "ENGINEERING_COMPLETE")
+        self.assertEqual(
+            {gate["status"] for gate in self.authority["project_gates"] if gate["id"] != "G-CONTRACT-INTEGRATION"},
+            {"OPEN_SCIENTIFIC_BLOCKER"},
+        )
+        self.assertIn("G-SEGMENTATION-VALIDATION", gates)
 
 
 if __name__ == "__main__":
