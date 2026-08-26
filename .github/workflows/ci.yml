@@ -22,46 +22,82 @@ jobs:
       - name: Install validation dependencies
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Initialize validation evidence
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force validation-results | Out-Null
+
       - name: Verify generated project authority
-        run: python scripts/render_authority_status.py --check
+        shell: pwsh
+        run: |
+          python scripts/render_authority_status.py --check 2>&1 |
+            Tee-Object -FilePath validation-results/authority-check.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Python regression tests
-        run: python -m unittest discover -s tests -v
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v 2>&1 |
+            Tee-Object -FilePath validation-results/python-unittest.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Parse JSON configuration
         shell: pwsh
         run: |
           $bad = @()
-          Get-ChildItem -Recurse -Filter '*.json' | ForEach-Object {
+          $jsonFiles = @(Get-ChildItem -Recurse -Filter '*.json')
+          $jsonFiles | ForEach-Object {
             try { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json | Out-Null }
             catch { $bad += "$($_.FullName): $($_.Exception.Message)" }
           }
-          if ($bad.Count) { throw ($bad -join "`n") }
+          if ($bad.Count) {
+            $bad | Tee-Object -FilePath validation-results/json-parse.txt
+            throw ($bad -join "`n")
+          }
+          "JSON parse: passed ($($jsonFiles.Count) JSON files)." |
+            Tee-Object -FilePath validation-results/json-parse.txt
 
       - name: Validate H&E hierarchy and study contract
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-HeConfiguration.ps1
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-HeConfiguration.ps1 2>&1 |
+            Tee-Object -FilePath validation-results/he-configuration.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Parse PowerShell scripts
         shell: powershell
         run: |
           $errors = @()
-          Get-ChildItem -Recurse -Filter '*.ps1' | ForEach-Object {
+          $powerShellFiles = @(Get-ChildItem -Recurse -Filter '*.ps1')
+          $powerShellFiles | ForEach-Object {
             $tokens = $null
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
               $_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
             if ($parseErrors) { $errors += $parseErrors }
           }
-          if ($errors.Count) { $errors | Format-List; exit 1 }
+          if ($errors.Count) {
+            $errors | Format-List | Out-String |
+              Set-Content -LiteralPath validation-results/powershell-parse.txt -Encoding utf8
+            $errors | Format-List
+            exit 1
+          }
+          $summary = "PowerShell parse: passed ($($powerShellFiles.Count) scripts)."
+          $summary | Set-Content -LiteralPath validation-results/powershell-parse.txt -Encoding utf8
+          $summary
 
       - name: Build launcher and run embedded self-tests
-        shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File .\launcher\build.ps1
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\build.ps1 2>&1 |
+            Tee-Object -FilePath validation-results/launcher-build.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run legacy environment equivalence
-        shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File .\launcher\run_legacy_equivalence.ps1
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\run_legacy_equivalence.ps1 2>&1 |
+            Tee-Object -FilePath validation-results/legacy-equivalence.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Confirm clean tracked tree
         shell: pwsh
@@ -69,3 +105,71 @@ jobs:
           git diff --check
           $changes = git status --short --untracked-files=no
           if ($changes) { throw "Validation modified tracked files:`n$changes" }
+
+      - name: Write machine-readable validation receipt
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force validation-results | Out-Null
+          $launcher = Get-ChildItem -LiteralPath . -File -Filter 'IFQuantLauncher-v*.exe' |
+            Sort-Object LastWriteTimeUtc | Select-Object -Last 1
+          $launcherRecord = $null
+          if ($launcher) {
+            $launcherRecord = [ordered]@{
+              file = $launcher.Name
+              sha256 = (Get-FileHash -LiteralPath $launcher.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            $sidecar = Join-Path $launcher.DirectoryName ($launcher.BaseName + '.sha256.txt')
+            if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+              Copy-Item -LiteralPath $sidecar -Destination validation-results/launcher.sha256.txt
+            }
+          }
+          $legacyReport = 'launcher/legacy_equivalence_report.txt'
+          if (Test-Path -LiteralPath $legacyReport -PathType Leaf) {
+            Copy-Item -LiteralPath $legacyReport -Destination validation-results/legacy_equivalence_report.txt
+          }
+          $receipt = [ordered]@{
+            schema_version = '1.0.0'
+            evidence_type = 'repository_validation'
+            repository = $env:GITHUB_REPOSITORY
+            commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            workflow = $env:GITHUB_WORKFLOW
+            job_status = '${{ job.status }}'
+            recorded_utc = (Get-Date).ToUniversalTime().ToString('o')
+            runner_os = $env:RUNNER_OS
+            python_version = ((python --version 2>&1 | Out-String).Trim())
+            launcher = $launcherRecord
+            transcripts = @(
+              @(
+                'authority-check.txt',
+                'python-unittest.txt',
+                'json-parse.txt',
+                'he-configuration.txt',
+                'powershell-parse.txt',
+                'launcher-build.txt',
+                'legacy-equivalence.txt',
+                'legacy_equivalence_report.txt'
+              ) | ForEach-Object {
+                [ordered]@{
+                  file    = $_
+                  present = (Test-Path -LiteralPath (Join-Path 'validation-results' $_) -PathType Leaf)
+                }
+              }
+            )
+            interpretation_boundary = 'Repository and engineering verification only; not biological validation or scientific promotion.'
+          }
+          $receipt | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath validation-results/validation-receipt.json -Encoding utf8
+          "Validation evidence artifact: validation-evidence-$env:GITHUB_SHA" |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-evidence-${{ github.sha }}
+          path: validation-results/
+          if-no-files-found: warn
+          overwrite: true
