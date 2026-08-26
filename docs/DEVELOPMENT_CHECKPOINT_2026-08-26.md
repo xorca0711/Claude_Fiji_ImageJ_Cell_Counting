@@ -146,3 +146,32 @@ validation or scientific promotion.
 The pre-existing user edit to `scripts/export_vsi_overviews.groovy` is not part
 of this checkpoint and must remain unstaged unless the user explicitly asks to
 publish it.
+
+## Post-checkpoint follow-up (2026-08-26, later the same day)
+
+Engineering completed after this checkpoint was frozen:
+
+- The `repository-validation` workflow now captures every gate's command
+  transcript and uploads a per-commit `validation-evidence-<sha>` artifact
+  with a machine-readable `validation-receipt.json`;
+  [`VALIDATION_EVIDENCE.md`](VALIDATION_EVIDENCE.md) documents the artifact
+  and its interpretation boundary.
+- Documentation was reconciled with the tree: the legacy-equivalence count
+  (85), the branch and tag topology as of 2026-08-26, the launcher version
+  lineage without a byte-reproducibility implication, and the uncalibrated
+  T1α direction relabelled as an exploratory observation in `README.md` and
+  `WORKFLOW.md`.
+- `scripts/run_confocal_260808.ps1` and `scripts/run_endpoint_confocal_260808.ps1`
+  derive the repository root from `$PSScriptRoot` instead of a hard-coded
+  `X:` path.
+- Future commits use a GitHub no-reply author address (repository-local
+  git configuration).
+- CI run 32930355081 (`repository-validation`, commit 56291ee) completed
+  successfully on 2026-08-26; it is the last run before the evidence artifact
+  existed.
+- Re-verification after these changes, on this machine: 224 unit tests passed
+  with the one known environment-dependent skip, the generated authority view
+  was current, 19 tracked JSON files and 18 tracked PowerShell scripts parsed,
+  the H&E configuration contract passed, the launcher built with the
+  choke-point scan, embedded self-test, and hidden UI smoke green, and the
+  Route 4 harness passed 85 checks with 0 failures.

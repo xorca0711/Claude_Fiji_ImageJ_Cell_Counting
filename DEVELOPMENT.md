@@ -143,7 +143,7 @@ Consequential examples:
 
 | Method | Applied to |
 |---|---|
-| Execution-based equivalence | Launcher legacy mode — 84 checks against what a *real child process* receives |
+| Execution-based equivalence | Launcher legacy mode: 85 checks against what a *real child process* receives |
 | Mutation testing | 28 mutants of the launcher's decision logic; 26 killed, 2 intentional controls |
 | Replay to bit-identity | The segmentation defect, reproduced at **IoU = 1.0000** |
 | Synthetic fixture | Same defect, demonstrable from a clone with no data |
