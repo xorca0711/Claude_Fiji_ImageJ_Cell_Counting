@@ -21,8 +21,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_URI = "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json"
-SCHEMA_VERSION = "1.3.0"
+SCHEMA_URI = (
+    "https://ifquant-lung.invalid/schemas/stage2-run-index-1.4.0.schema.json"
+)
+SCHEMA_VERSION = "1.4.0"
+STAGE1_MANIFEST_SCHEMA_VERSION = "1.3"
 INDEX_TYPE = "ifquant_wsi_stage2_run_index"
 INDEX_STATUS = "stage2_integrity_complete"
 ANALYTICAL_IDENTITY = "section_id|region|panel"
@@ -33,6 +36,7 @@ SOURCE_METADATA_AUTHORITY = "bioformats_used_files_content_verified_before_and_a
 REFERENCE_MASK_SCHEMA_URI = (
     "https://ifquant-lung.invalid/schemas/wsi-reference-mask-profile.schema.json"
 )
+REFERENCE_MASK_PIXEL_ENCODING = "row_major_uint8_0_255"
 CHANNEL_TOKEN_RE = re.compile(r"^C([1-9][0-9]*)-([A-Za-z0-9.-]+)$")
 # Acquisition file labels use wavelength suffixes (for example ``-488``).
 # Restrict stripping to plausible three-digit visible/far-red wavelengths so a
@@ -372,11 +376,38 @@ def _finite_number(
         isinstance(value, (int, float)) and not isinstance(value, bool),
         f"{label}.{key} must be numeric",
     )
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise Stage2IndexError(f"{label}.{key} must be finite") from exc
     _require(math.isfinite(number), f"{label}.{key} must be finite")
     if positive:
         _require(number > 0, f"{label}.{key} must be positive")
     return number
+
+
+def _ceil_downsampled_dimension(
+    full_resolution: int, downsample: float, label: str
+) -> int:
+    """Return ceil(full_resolution/downsample) with controlled malformed-input errors."""
+
+    _require(full_resolution > 0, f"{label} full-resolution dimension must be positive")
+    _require(
+        math.isfinite(downsample) and downsample > 0,
+        f"{label} downsample must be finite and positive",
+    )
+    try:
+        scaled = full_resolution / downsample
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise Stage2IndexError(f"{label} downsample ratio is outside the supported range") from exc
+    _require(
+        math.isfinite(scaled) and scaled > 0,
+        f"{label} downsample ratio is outside the supported range",
+    )
+    try:
+        return math.ceil(scaled)
+    except (OverflowError, ValueError) as exc:
+        raise Stage2IndexError(f"{label} downsample ratio is outside the supported range") from exc
 
 
 def _stage1_script(stage1: Mapping[str, Any]) -> dict[str, Any]:
@@ -508,6 +539,12 @@ def _stage1_profile(stage1: Mapping[str, Any]) -> dict[str, Any]:
                 f"Stage 1 profile field {field} must be a non-empty string",
             )
             value = value.strip()
+            if field == "schema_version":
+                _require(
+                    value == STAGE1_MANIFEST_SCHEMA_VERSION,
+                    "unsupported Stage 1 manifest schema version; expected "
+                    f"{STAGE1_MANIFEST_SCHEMA_VERSION}",
+                )
         else:
             _require(
                 isinstance(value, dict),
@@ -542,6 +579,122 @@ def _verified_reference_artifact(
         "published_relative_path": published_relative_path,
         "content": identity,
     }
+
+
+def _verified_reference_mask_pixels(
+    record: Any,
+    *,
+    base_dir: Path,
+    width: int,
+    height: int,
+    label: str,
+) -> tuple[dict[str, Any], bytes, int]:
+    """Re-hash and decode one canonical row-major binary-mask pixel sidecar."""
+
+    _require(isinstance(record, dict), f"{label} must be an object")
+    _require(
+        set(record)
+        == {"encoding", "width", "height", "published_relative_path", "content"},
+        f"{label} has missing or unknown fields",
+    )
+    _require(
+        record.get("encoding") == REFERENCE_MASK_PIXEL_ENCODING,
+        f"{label}.encoding is unsupported",
+    )
+    declared_width = _integer(record, "width", label)
+    declared_height = _integer(record, "height", label)
+    _require(
+        declared_width == width and declared_height == height,
+        f"{label} dimensions disagree with the selected-series downsample grid",
+    )
+    artifact = _verified_reference_artifact(
+        {
+            "published_relative_path": record.get("published_relative_path"),
+            "content": record.get("content"),
+        },
+        base_dir=base_dir,
+        label=label,
+    )
+    path = _resolve_portable(base_dir, artifact["published_relative_path"], label)
+    payload, snapshot_sha256 = _read_bytes_snapshot(path, label)
+    _require(
+        snapshot_sha256 == artifact["content"]["sha256"],
+        f"{label} changed while it was being decoded",
+    )
+    expected_length = width * height
+    _require(
+        len(payload) == expected_length,
+        f"{label} byte length does not equal width * height",
+    )
+    foreground = 0
+    for index, value in enumerate(payload):
+        if value == 255:
+            foreground += 1
+        elif value != 0:
+            raise Stage2IndexError(
+                f"{label} must contain only 0 and 255; found {value} "
+                f"at linear pixel index {index}"
+            )
+    return (
+        {
+            "encoding": REFERENCE_MASK_PIXEL_ENCODING,
+            "width": width,
+            "height": height,
+            **artifact,
+        },
+        payload,
+        foreground,
+    )
+
+
+def _stage1_slides_by_source(
+    stage1: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    """Close every Stage 1 producer source/stem identity before slide selection."""
+
+    manifest_slides = stage1.get("slides")
+    _require(
+        isinstance(manifest_slides, list) and bool(manifest_slides),
+        "Stage 1 manifest slides must be a non-empty array",
+    )
+    manifest_by_source: dict[str, Mapping[str, Any]] = {}
+    manifest_sources_folded: set[str] = set()
+    manifest_stems_folded: set[str] = set()
+    for index, manifest_slide in enumerate(manifest_slides, start=1):
+        label = f"Stage 1 manifest slides[{index}]"
+        _require(isinstance(manifest_slide, dict), f"{label} must be an object")
+        manifest_source = _plain_filename(
+            _strict_nonempty_text(manifest_slide, "source_vsi", label),
+            f"{label}.source_vsi",
+        )
+        _require(
+            manifest_source.lower().endswith(".vsi"),
+            f"{label}.source_vsi must be a .vsi filename",
+        )
+        _require(
+            manifest_source not in manifest_by_source,
+            f"Stage 1 manifest repeats source_vsi {manifest_source!r}",
+        )
+        _require(
+            manifest_source.casefold() not in manifest_sources_folded,
+            f"Stage 1 manifest repeats source_vsi case-insensitively: {manifest_source!r}",
+        )
+        manifest_sources_folded.add(manifest_source.casefold())
+        manifest_stem = _plain_filename(
+            _strict_nonempty_text(manifest_slide, "slide_stem", label),
+            f"{label}.slide_stem",
+        )
+        _require(
+            manifest_stem == manifest_source[:-4],
+            f"{label}.slide_stem disagrees with source_vsi",
+        )
+        _require(
+            manifest_stem.casefold() not in manifest_stems_folded,
+            f"Stage 1 manifest repeats slide_stem case-insensitively: {manifest_stem!r}",
+        )
+        manifest_stems_folded.add(manifest_stem.casefold())
+        manifest_by_source[manifest_source] = manifest_slide
+    return manifest_by_source
 
 
 def _validate_published_reference_profile(
@@ -632,7 +785,9 @@ def _validate_published_reference_profile(
         "tissue_mask",
         "airway_mask",
     }
+    artifact_fields = {"relative_path", "size_bytes", "sha256"}
     profile_by_source: dict[str, Mapping[str, Any]] = {}
+    profile_sources_folded: set[str] = set()
     for index, row in enumerate(profile_slides, start=1):
         label = f"Stage 1 reference-mask profile slides[{index}]"
         _require(isinstance(row, dict), f"{label} must be an object")
@@ -648,76 +803,270 @@ def _validate_published_reference_profile(
             source_vsi not in profile_by_source,
             f"Stage 1 reference-mask profile repeats source_vsi {source_vsi!r}",
         )
+        _require(
+            source_vsi.casefold() not in profile_sources_folded,
+            "Stage 1 reference-mask profile repeats source_vsi "
+            f"case-insensitively: {source_vsi!r}",
+        )
+        profile_sources_folded.add(source_vsi.casefold())
+        for artifact_key in ("tissue_mask", "airway_mask"):
+            artifact_label = f"{label}.{artifact_key}"
+            declaration = row.get(artifact_key)
+            _require(
+                isinstance(declaration, dict), f"{artifact_label} must be an object"
+            )
+            _require(
+                set(declaration) == artifact_fields,
+                f"{artifact_label} has missing or unknown fields",
+            )
+            _portable_reference_path(
+                declaration.get("relative_path"),
+                f"{artifact_label}.relative_path",
+            )
+            size_bytes = declaration.get("size_bytes")
+            _require(
+                isinstance(size_bytes, int)
+                and not isinstance(size_bytes, bool)
+                and size_bytes > 0,
+                f"{artifact_label}.size_bytes must be a positive integer",
+            )
+            sha256 = declaration.get("sha256")
+            _require(
+                isinstance(sha256, str) and bool(SHA256_RE.fullmatch(sha256)),
+                f"{artifact_label}.sha256 must be a lowercase SHA-256",
+            )
         profile_by_source[source_vsi] = row
 
-    manifest_slides = stage1.get("slides")
+    manifest_by_source = _stage1_slides_by_source(stage1)
     _require(
-        isinstance(manifest_slides, list) and bool(manifest_slides),
-        "Stage 1 manifest slides must be a non-empty array",
-    )
-    manifest_sources: list[str] = []
-    for index, manifest_slide in enumerate(manifest_slides, start=1):
-        label = f"Stage 1 manifest slides[{index}]"
-        _require(isinstance(manifest_slide, dict), f"{label} must be an object")
-        manifest_sources.append(
-            _plain_filename(
-                _strict_nonempty_text(manifest_slide, "source_vsi", label),
-                f"{label}.source_vsi",
-            )
-        )
-    _check_unique(manifest_sources, "source_vsi in Stage 1 manifest")
-    _require(
-        set(profile_by_source) == set(manifest_sources),
+        set(profile_by_source) == set(manifest_by_source),
         "Stage 1 reference-mask profile slide set does not exactly match the Stage 1 manifest",
     )
+    stage1_tissue = stage1.get("tissue")
+    _require(isinstance(stage1_tissue, dict), "Stage 1 tissue profile must be an object")
+    stage1_tissue_downsample = _finite_number(
+        stage1_tissue, "downsample", "Stage 1 tissue profile", positive=True
+    )
+    _require(
+        stage1_tissue.get("threshold_method") == "external_binary_mask",
+        "Stage 1 tissue profile threshold_method must be external_binary_mask",
+    )
+
+    # The profile is one closed multi-slide contract. Validate every declared
+    # slide identity here, even while building an index for only one slide, so
+    # an unrelated malformed entry cannot hide behind a valid profile hash.
+    for manifest_source in sorted(manifest_by_source):
+        manifest_slide = manifest_by_source[manifest_source]
+        profile_slide = profile_by_source[manifest_source]
+        identity_label = f"Stage 1 reference-mask profile slide {manifest_source!r}"
+        manifest_label = f"Stage 1 manifest slide {manifest_source!r}"
+        source_package = _stage1_source_package(manifest_slide, manifest_source)
+        _require(
+            profile_slide.get("source_package_sha256")
+            == source_package.get("package_sha256"),
+            f"{identity_label} source package does not match the Stage 1 manifest",
+        )
+        for profile_key, slide_key in (
+            ("series_index", "series_index"),
+            ("full_resolution_width", "width"),
+            ("full_resolution_height", "height"),
+        ):
+            _require(
+                _integer(profile_slide, profile_key, identity_label)
+                == _integer(manifest_slide, slide_key, manifest_label),
+                f"{identity_label} {profile_key} disagrees with the Stage 1 manifest",
+            )
+        _require(
+            _integer(profile_slide, "series_index", identity_label) >= 0,
+            f"{identity_label} series_index must be non-negative",
+        )
+        manifest_reference = manifest_slide.get("reference_space")
+        _require(
+            isinstance(manifest_reference, dict),
+            f"{manifest_label} lacks reference_space",
+        )
+        _require(
+            manifest_reference.get("mode") == "external_binary_reference_masks"
+            and manifest_reference.get("authority")
+            == "content_bound_external_profile_and_binary_masks"
+            and manifest_reference.get("sampling_semantics")
+            == "exhaustive_grid_over_declared_reference_space"
+            and manifest_reference.get("airway_excluded") is True
+            and manifest_reference.get("profile_sha256")
+            == profile_artifact["content"]["sha256"]
+            and manifest_reference.get("content_verified_before_and_after") is True,
+            f"{identity_label} is not bound to the published external profile",
+        )
+        for profile_key in (
+            "profile_id",
+            "review_state",
+            "review_protocol_id",
+            "coordinate_space",
+            "mask_logic",
+        ):
+            _require(
+                manifest_reference.get(profile_key) == profile.get(profile_key),
+                f"{identity_label} {profile_key} disagrees with the published profile",
+            )
+        profile_downsample = _finite_number(
+            profile_slide, "downsample", identity_label, positive=True
+        )
+        reference_downsample = _finite_number(
+            manifest_reference, "downsample", manifest_label, positive=True
+        )
+        profile_width = _integer(profile_slide, "mask_width", identity_label)
+        profile_height = _integer(profile_slide, "mask_height", identity_label)
+        full_width = _integer(
+            profile_slide, "full_resolution_width", identity_label
+        )
+        full_height = _integer(
+            profile_slide, "full_resolution_height", identity_label
+        )
+        expected_profile_width = _ceil_downsampled_dimension(
+            full_width, profile_downsample, f"{identity_label} width"
+        )
+        expected_profile_height = _ceil_downsampled_dimension(
+            full_height, profile_downsample, f"{identity_label} height"
+        )
+        _require(
+            math.isclose(
+                profile_downsample,
+                reference_downsample,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and profile_downsample == stage1_tissue_downsample
+            and profile_width > 0
+            and profile_height > 0
+            and full_width > 0
+            and full_height > 0
+            and profile_width == expected_profile_width
+            and profile_height == expected_profile_height
+            and profile_width
+            == _integer(manifest_reference, "mask_width", manifest_label)
+            and profile_height
+            == _integer(manifest_reference, "mask_height", manifest_label),
+            f"{identity_label} downsample grid disagrees with the Stage 1 manifest",
+        )
+
+        manifest_slide_stem = _plain_filename(
+            _strict_nonempty_text(manifest_slide, "slide_stem", manifest_label),
+            f"{manifest_label}.slide_stem",
+        )
+        manifest_slide_dir = _resolve_portable(
+            stage1_root, manifest_slide_stem, manifest_label
+        )
+        _require(
+            manifest_slide_dir.is_dir(),
+            f"{manifest_label} output directory is missing",
+        )
+        for profile_key, source_key in (
+            ("tissue_mask", "source_tissue_mask"),
+            ("airway_mask", "source_airway_mask"),
+        ):
+            declaration = profile_slide[profile_key]
+            source_record = manifest_reference.get(source_key)
+            source_label = f"{manifest_label}.{source_key}"
+            _require(
+                isinstance(source_record, dict)
+                and set(source_record)
+                == {"profile_relative_path", "published_relative_path", "content"},
+                f"{source_label} has missing or unknown fields",
+            )
+            profile_relative_path = _portable_reference_path(
+                source_record.get("profile_relative_path"),
+                f"{source_label}.profile_relative_path",
+            )
+            published = _verified_reference_artifact(
+                {
+                    "published_relative_path": source_record.get(
+                        "published_relative_path"
+                    ),
+                    "content": source_record.get("content"),
+                },
+                base_dir=manifest_slide_dir,
+                label=source_label,
+            )
+            _require(
+                profile_relative_path == declaration["relative_path"]
+                and published["content"]["size_bytes"]
+                == declaration["size_bytes"]
+                and published["content"]["sha256"] == declaration["sha256"],
+                f"{source_label} disagrees with the published reference-mask profile",
+            )
+
+        _verified_reference_artifact(
+            manifest_reference.get("tissue_mask"),
+            base_dir=manifest_slide_dir,
+            label=f"{manifest_label}.tissue_mask",
+        )
+        _, source_tissue_pixels, source_tissue_foreground = (
+            _verified_reference_mask_pixels(
+                manifest_reference.get("source_tissue_mask_pixels"),
+                base_dir=manifest_slide_dir,
+                width=profile_width,
+                height=profile_height,
+                label=f"{manifest_label}.source_tissue_mask_pixels",
+            )
+        )
+        _, source_airway_pixels, source_airway_foreground = (
+            _verified_reference_mask_pixels(
+                manifest_reference.get("source_airway_mask_pixels"),
+                base_dir=manifest_slide_dir,
+                width=profile_width,
+                height=profile_height,
+                label=f"{manifest_label}.source_airway_mask_pixels",
+            )
+        )
+        _, analysis_pixels, analysis_foreground = _verified_reference_mask_pixels(
+            manifest_reference.get("analysis_tissue_mask_pixels"),
+            base_dir=manifest_slide_dir,
+            width=profile_width,
+            height=profile_height,
+            label=f"{manifest_label}.analysis_tissue_mask_pixels",
+        )
+        for pixel_index, (tissue_value, airway_value, analysis_value) in enumerate(
+            zip(source_tissue_pixels, source_airway_pixels, analysis_pixels)
+        ):
+            _require(
+                airway_value == 0 or tissue_value == 255,
+                f"{identity_label} airway pixels are not a subset of tissue "
+                f"at linear pixel index {pixel_index}",
+            )
+            expected_analysis = (
+                255 if tissue_value == 255 and airway_value == 0 else 0
+            )
+            _require(
+                analysis_value == expected_analysis,
+                f"{identity_label} analysis pixels do not equal tissue AND NOT airway "
+                f"at linear pixel index {pixel_index}",
+            )
+        raw_tissue = _integer(
+            manifest_reference,
+            "tissue_foreground_px_before_airway_exclusion",
+            manifest_label,
+        )
+        airway = _integer(
+            manifest_reference, "airway_foreground_px", manifest_label
+        )
+        analysis_tissue = _integer(
+            manifest_reference, "analysis_tissue_foreground_px", manifest_label
+        )
+        _require(
+            0 < raw_tissue <= profile_width * profile_height
+            and 0 <= airway < raw_tissue
+            and analysis_tissue == raw_tissue - airway
+            and raw_tissue == source_tissue_foreground
+            and airway == source_airway_foreground
+            and analysis_tissue == analysis_foreground,
+            f"{identity_label} tissue/airway foreground counts do not reconcile",
+        )
 
     source_vsi = _plain_filename(
         _strict_nonempty_text(slide, "source_vsi", "Stage 1 slide"),
         "Stage 1 slide.source_vsi",
     )
     profile_slide = profile_by_source[source_vsi]
-    source_package = slide.get("source_package")
-    _require(isinstance(source_package, dict), "Stage 1 slide lacks source_package")
-    _require(
-        profile_slide.get("source_package_sha256")
-        == source_package.get("package_sha256"),
-        "Stage 1 reference-mask profile source package does not match the slide",
-    )
-    for profile_key, slide_key in (
-        ("series_index", "series_index"),
-        ("full_resolution_width", "width"),
-        ("full_resolution_height", "height"),
-    ):
-        _require(
-            _integer(profile_slide, profile_key, "Stage 1 reference-mask profile slide")
-            == _integer(slide, slide_key, "Stage 1 slide"),
-            f"Stage 1 reference-mask profile {profile_key} disagrees with the slide",
-        )
-    profile_downsample = _finite_number(
-        profile_slide,
-        "downsample",
-        "Stage 1 reference-mask profile slide",
-        positive=True,
-    )
-    reference_downsample = _finite_number(
-        reference, "downsample", "Stage 1 reference_space", positive=True
-    )
-    _require(
-        math.isclose(
-            profile_downsample, reference_downsample, rel_tol=0.0, abs_tol=1e-12
-        )
-        and _integer(
-            profile_slide, "mask_width", "Stage 1 reference-mask profile slide"
-        )
-        == _integer(reference, "mask_width", "Stage 1 reference_space")
-        and _integer(
-            profile_slide, "mask_height", "Stage 1 reference-mask profile slide"
-        )
-        == _integer(reference, "mask_height", "Stage 1 reference_space"),
-        "Stage 1 reference-mask profile downsample grid disagrees with the slide",
-    )
-
-    artifact_fields = {"relative_path", "size_bytes", "sha256"}
     for profile_key, source_key in (
         ("tissue_mask", "source_tissue_mask"),
         ("airway_mask", "source_airway_mask"),
@@ -796,13 +1145,34 @@ def _stage1_reference_space(
     downsample = _finite_number(
         reference, "downsample", "Stage 1 reference_space", positive=True
     )
+    tissue_downsample = _finite_number(
+        tissue_profile, "downsample", "Stage 1 tissue profile", positive=True
+    )
+    _require(
+        tissue_downsample == downsample,
+        "Stage 1 tissue profile downsample disagrees with the slide reference space",
+    )
+    expected_threshold_method = (
+        "Otsu" if mode == "automatic_dapi_otsu_engineering" else "external_binary_mask"
+    )
+    _require(
+        tissue_profile.get("threshold_method") == expected_threshold_method,
+        f"Stage 1 tissue profile threshold_method must be {expected_threshold_method}",
+    )
     mask_width = _integer(reference, "mask_width", "Stage 1 reference_space")
     mask_height = _integer(reference, "mask_height", "Stage 1 reference_space")
     _require(mask_width > 0 and mask_height > 0, "Stage 1 mask dimensions must be positive")
+    full_width = _integer(slide, "width", "Stage 1 slide")
+    full_height = _integer(slide, "height", "Stage 1 slide")
     _require(
-        mask_width == math.ceil(_integer(slide, "width", "Stage 1 slide") / downsample)
+        mask_width
+        == _ceil_downsampled_dimension(
+            full_width, downsample, "Stage 1 reference-space width"
+        )
         and mask_height
-        == math.ceil(_integer(slide, "height", "Stage 1 slide") / downsample),
+        == _ceil_downsampled_dimension(
+            full_height, downsample, "Stage 1 reference-space height"
+        ),
         "Stage 1 reference-space raster dimensions do not match the declared series grid",
     )
     foreground = _integer(
@@ -811,6 +1181,19 @@ def _stage1_reference_space(
     _require(
         0 < foreground <= mask_width * mask_height,
         "Stage 1 analysis_tissue_foreground_px is outside the raster bounds",
+    )
+    analysis_pixels_record, _, analysis_pixels_foreground = (
+        _verified_reference_mask_pixels(
+            reference.get("analysis_tissue_mask_pixels"),
+            base_dir=slide_dir,
+            width=mask_width,
+            height=mask_height,
+            label="Stage 1 analysis tissue-mask pixels",
+        )
+    )
+    _require(
+        analysis_pixels_foreground == foreground,
+        "Stage 1 analysis tissue-mask pixel count disagrees with the manifest",
     )
     normalized: dict[str, Any] = {
         "mode": mode,
@@ -831,6 +1214,7 @@ def _stage1_reference_space(
             base_dir=slide_dir,
             label="Stage 1 analysis tissue mask",
         ),
+        "analysis_tissue_mask_pixels": analysis_pixels_record,
         "content_verified_before_and_after": True,
     }
 
@@ -964,12 +1348,28 @@ def _stage1_reference_space(
             reference=reference,
             normalized_sources=normalized_sources,
         )
+        source_tissue_pixels_record, _, _ = _verified_reference_mask_pixels(
+            reference.get("source_tissue_mask_pixels"),
+            base_dir=slide_dir,
+            width=mask_width,
+            height=mask_height,
+            label="Stage 1 source tissue-mask pixels",
+        )
+        source_airway_pixels_record, _, _ = _verified_reference_mask_pixels(
+            reference.get("source_airway_mask_pixels"),
+            base_dir=slide_dir,
+            width=mask_width,
+            height=mask_height,
+            label="Stage 1 source airway-mask pixels",
+        )
         normalized.update(
             {
                 "profile_sha256": profile_sha,
                 "reference_mask_profile": profile_artifact,
                 "tissue_foreground_px_before_airway_exclusion": raw_tissue,
                 "airway_foreground_px": airway,
+                "source_tissue_mask_pixels": source_tissue_pixels_record,
+                "source_airway_mask_pixels": source_airway_pixels_record,
                 **normalized_sources,
             }
         )
@@ -2136,11 +2536,11 @@ def build_stage2_index(
     stage1, stage1_manifest_snapshot_sha256 = _read_json_snapshot(
         stage1_manifest, "Stage 1 manifest"
     )
-    slides = stage1.get("slides")
-    _require(isinstance(slides, list), "Stage 1 manifest must contain a slides array")
+    slides_by_source = _stage1_slides_by_source(stage1)
     stage1_matches = [
-        slide for slide in slides
-        if isinstance(slide, dict) and str(slide.get("slide_stem") or "") == slide_dir.name
+        slide
+        for slide in slides_by_source.values()
+        if slide["slide_stem"] == slide_dir.name
     ]
     _require(
         len(stage1_matches) == 1,

@@ -10,7 +10,7 @@ folder so a mapping field can never be mistaken for an analysis field.
 """
 import csv, os, re, sys
 
-ROOT = r"D:\Confocal_Images\260808-CW\260808-CW"
+ROOT = r"D:\Microscopy_Images\260808-CW_Confocal\260808-CW"
 OUT = r"D:\IFQ_Runs\confocal_260808"
 os.makedirs(OUT, exist_ok=True)
 

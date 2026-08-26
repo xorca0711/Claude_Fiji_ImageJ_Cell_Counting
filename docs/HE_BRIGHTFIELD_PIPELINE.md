@@ -122,6 +122,18 @@ The output package contains:
   records with accepted review, provenance, and `observed_units` scope;
 - `he_review_aggregation.audit.json`: the integrity ledger, written last.
 
+The audit and every schema-v2 record bind the complete Python import closure by
+content hash. The software roles are `aggregation_code` (`he_pipeline.py`),
+`ifquant_package_init`, `measurement_record_builder`,
+`measurement_record_contract`, `measurement_record_route_adapter`, and
+`stage2_index_contract`; `python_interpreter` binds the exact executable bytes
+used to run them. Record `code_revision` remains the exact `he_pipeline.py`
+SHA-256; the other five source hashes make the package imports explicit rather
+than silently treating the entry script as the whole program. With the five
+data authorities, the audit ledger has exactly 12 roles; each measurement
+record adds its `declared_source_package_ledger` for exactly 13 provenance
+inputs.
+
 No mean, sum, median, weighted total, or other scalar ordinal composite is
 created. The two sections remain technical observations and biological
 `n` remains four mice. Input drift before publication or artifact tampering

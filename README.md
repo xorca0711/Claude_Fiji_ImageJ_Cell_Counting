@@ -106,7 +106,7 @@ powershell -ExecutionPolicy Bypass -File ./launcher/run_legacy_equivalence.ps1
 ```
 
 The first demonstrates the segmentation defect and its fix. The second is an
-execution-based backward-compatibility proof — 84 checks comparing what a *real
+execution-based backward-compatibility proof — 85 checks comparing what a *real
 child process* receives, including the self-critical one that detects the
 embedded engine has drifted from the version it claims equivalence to.
 
@@ -130,7 +130,8 @@ embedded engine has drifted from the version it claims equivalence to.
 |---|---|
 | **Machine-readable current authority** | [`docs/generated/AUTHORITY_STATUS.md`](docs/generated/AUTHORITY_STATUS.md) |
 | **Audit-driven architecture and gates** | [`docs/AUDIT_REMEDIATION_ROADMAP.md`](docs/AUDIT_REMEDIATION_ROADMAP.md) |
-| **Current scientific state** — what is validated, exploratory, retracted | [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) |
+| **Current engineering checkpoint** — completed work and remaining external gates | [`docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md`](docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md) |
+| **Historical scientific narrative** — 2026-08-12 snapshot of validated, exploratory, and retracted claims | [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) |
 | **The algorithm** — routing, decision hierarchy, cutoff derivation, Z policy | [`WORKFLOW.md`](WORKFLOW.md) |
 | **Architecture, explorable** — pan/zoom, theme, focus views, export | [`docs/architecture.html`](docs/architecture.html) — download and open; GitHub shows source, not the render |
 | **Negative results & retractions** — markers tested and rejected | [`docs/NEGATIVE_RESULTS.md`](docs/NEGATIVE_RESULTS.md) |
@@ -182,20 +183,32 @@ Route is the first choice, before any folder:
 |---|---|---|---|
 | 1 | IF — confocal / field images | Fiji only | `run_summary.csv` (+ `.xlsx`, `run_manifest.json`), one row per (image, region) |
 | 2 | IF — slide scanner (`.vsi`) | QuPath → Fiji → Python | tiles → per-tile measurements → `stats/slide_level_summary.csv` |
-| 3 | H&E / brightfield | QuPath engineering pilot | **launcher route disabled**; H0-H3 review artifacts only |
+| 3 | H&E / brightfield | packaged Python review tools only | biological execution disabled; separate status/build-review/aggregate-review screen |
 | 4 | Fiji-only legacy mode | Fiji only | the v1.7.2 environment and command line, verified by execution |
 
-Route 3 is visible and greyed rather than hidden, with a written reason: the
-fluorescence engine assumes bright signal on a dark background, which is
-inverted for H&E, so pointing route 1 at an H&E slide **would not fail** — it
-would produce a complete, plausible, wrong `run_summary.csv`. Route 2
+Route 3 biological execution is visible and greyed rather than hidden, with a
+written reason. A separate review-only launcher screen invokes only the
+content-bound `he_pipeline.py status`, `build-review`, and `aggregate-review`
+commands; it cannot enter Fiji/QuPath fluorescence execution or unvalidated
+H5/H6 analysis. It reports R1/H3 as the highest authorized state only after
+validating external package bytes. The launcher probes and content-binds the
+selected CPython 3.10+ interpreter, parses and reconciles the exact aggregate
+CSV/JSONL contracts, and serializes cancellation against fresh atomic
+publication. After the Windows directory move it reopens and revalidates the
+final package before authorization, so its receipt cannot falsely claim that
+nothing was published. It keeps
+automated lesion calls, immune lineage, KRT5-pod identity, biological reporting,
+and group inference unavailable. The fluorescence engine assumes bright signal
+on a dark background, which is inverted for H&E, so pointing route 1 at an H&E
+slide **would not fail** — it would produce a complete, plausible, wrong
+`run_summary.csv`. Route 2
 hard-blocks a missing threshold; routes 1 and 4 only flag it, because a field
 run with adaptive thresholds is a defensible exploratory measurement whereas a
 slide run silently re-deriving a threshold on each of ~370 tiles is not one
 measurement at all. Details in [`launcher/README.md`](launcher/README.md).
 
-The H&E module has an executable, review-gated H0-H3 engineering pilot, but no
-validated biological endpoint and no enabled launcher route. Its decision
+The H&E module has an executable, review-gated H0-H3 engineering/review tool,
+but no validated biological endpoint and no enabled biological launcher route. Its decision
 hierarchy, endpoint tiers, fail-closed gates, executed 2026-08-12 pilot, and
 study mapping are in
 [`docs/HE_BRIGHTFIELD_DECISION_HIERARCHY.md`](docs/HE_BRIGHTFIELD_DECISION_HIERARCHY.md).
@@ -239,7 +252,7 @@ bundled JVM directly, as above, is the working path.
 
 ```powershell
 # Stage 1 — QuPath tiles the slide (measures nothing)
-$env:IFQ_WSI_INPUT  = 'D:\Confocal_Images\<slides>'   # .vsi file or folder; .ets is refused
+$env:IFQ_WSI_INPUT  = 'D:\path\to\raw_slides'         # .vsi file or folder; .ets is refused
 $env:IFQ_WSI_OUTPUT = 'D:\IFQ_Runs\<new_empty_run>'
 & 'X:\QuPath\QuPath-0.7.0 (console).exe' script qupath_wsi_tile_export.groovy
 
@@ -300,7 +313,8 @@ outputs and cannot be indexed for analytical aggregation.
   headless and content-bound only when an explicit model archive and sealed
   runtime manifest are supplied; biological model validation remains required.
   See [`docs/STARDIST_RUNTIME.md`](docs/STARDIST_RUNTIME.md).
-- **Python 3**, standard library only, for both aggregation scripts.
+- **CPython 3.10+**, standard library only, for aggregation and the isolated
+  H&E review tooling.
 - Windows ARM64 or x64 with .NET Framework 4.x for the launcher.
 
 ## Repository map
@@ -319,13 +333,14 @@ outputs and cannot be indexed for analytical aggregation.
 | `config/lung_marker_registry.json` | Marker aliases, localisation, analytical-role defaults. Not a whitelist and not a diagnostic classifier. |
 | `launcher/` | C#/WinForms front end, its build script, and the executed legacy-equivalence harness. |
 | `panels/` | Tracked figure rendering (merge panels, QC overlays). Mask-driven v8 was validated on 80 fields; see [`docs/VISUAL_PANELS.md`](docs/VISUAL_PANELS.md). |
-| `docs/` | Depth: [`PROJECT_STATE.md`](docs/PROJECT_STATE.md) (living handoff), [`NEGATIVE_RESULTS.md`](docs/NEGATIVE_RESULTS.md), [`ECTOPIC_POD_ENDPOINT.md`](docs/ECTOPIC_POD_ENDPOINT.md), [`WSI_TILING_WORKFLOW.md`](docs/WSI_TILING_WORKFLOW.md), [`QUPATH_FIJI_INTEGRATION.md`](docs/QUPATH_FIJI_INTEGRATION.md), [`MARKER_MORPHOLOGY_GUIDE.md`](docs/MARKER_MORPHOLOGY_GUIDE.md), [`VISUAL_PANELS.md`](docs/VISUAL_PANELS.md). |
+| `docs/` | Depth: [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md) (current engineering checkpoint), [`PROJECT_STATE.md`](docs/PROJECT_STATE.md) (historical narrative), [`NEGATIVE_RESULTS.md`](docs/NEGATIVE_RESULTS.md), [`ECTOPIC_POD_ENDPOINT.md`](docs/ECTOPIC_POD_ENDPOINT.md), [`WSI_TILING_WORKFLOW.md`](docs/WSI_TILING_WORKFLOW.md), [`QUPATH_FIJI_INTEGRATION.md`](docs/QUPATH_FIJI_INTEGRATION.md), [`MARKER_MORPHOLOGY_GUIDE.md`](docs/MARKER_MORPHOLOGY_GUIDE.md), [`VISUAL_PANELS.md`](docs/VISUAL_PANELS.md). |
 | `legacy/` | Non-authoritative archive. No threshold in it is current. |
 | `WORKFLOW.md` | Superseded as an entry point; see the banner at its top. |
 
-`docs/PROJECT_STATE.md` is a narrative historical handoff. Current release and
-claim status comes from `authority/project_state.json` and its generated view;
-any discrepancy must be resolved explicitly.
+`docs/PROJECT_STATE.md` is a narrative historical handoff. Current engineering
+status is recorded in `docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md`; current
+release and claim status comes from `authority/project_state.json` and its
+generated view. Any discrepancy must be resolved explicitly.
 
 ---
 

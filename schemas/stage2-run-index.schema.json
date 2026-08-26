@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json",
+  "$id": "https://ifquant-lung.invalid/schemas/stage2-run-index-1.4.0.schema.json",
   "title": "IFQuant WSI Stage 2 run index",
   "description": "Portable, content-addressed declaration of the Stage 2 outputs that may enter WSI Stage 3 aggregation.",
   "type": "object",
@@ -44,10 +44,10 @@
   ],
   "properties": {
     "$schema": {
-      "const": "https://ifquant-lung.invalid/schemas/stage2-run-index.schema.json"
+      "const": "https://ifquant-lung.invalid/schemas/stage2-run-index-1.4.0.schema.json"
     },
     "schema_version": {
-      "const": "1.3.0"
+      "const": "1.4.0"
     },
     "index_type": {
       "const": "ifquant_wsi_stage2_run_index"
@@ -259,6 +259,18 @@
         "content": { "$ref": "#/$defs/contentIdentity" }
       }
     },
+    "binaryMaskPixels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "width", "height", "published_relative_path", "content"],
+      "properties": {
+        "encoding": { "const": "row_major_uint8_0_255" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "published_relative_path": { "$ref": "#/$defs/relativePath" },
+        "content": { "$ref": "#/$defs/contentIdentity" }
+      }
+    },
     "referenceSpace": {
       "type": "object",
       "additionalProperties": false,
@@ -277,6 +289,7 @@
         "mask_height",
         "analysis_tissue_foreground_px",
         "tissue_mask",
+        "analysis_tissue_mask_pixels",
         "content_verified_before_and_after"
       ],
       "properties": {
@@ -298,13 +311,16 @@
         "mask_height": { "type": "integer", "minimum": 1 },
         "analysis_tissue_foreground_px": { "type": "integer", "minimum": 1 },
         "tissue_mask": { "$ref": "#/$defs/publishedContentArtifact" },
+        "analysis_tissue_mask_pixels": { "$ref": "#/$defs/binaryMaskPixels" },
         "content_verified_before_and_after": { "const": true },
         "profile_sha256": { "$ref": "#/$defs/sha256" },
         "reference_mask_profile": { "$ref": "#/$defs/publishedContentArtifact" },
         "tissue_foreground_px_before_airway_exclusion": { "type": "integer", "minimum": 1 },
         "airway_foreground_px": { "type": "integer", "minimum": 0 },
         "source_tissue_mask": { "$ref": "#/$defs/profileSourceArtifact" },
-        "source_airway_mask": { "$ref": "#/$defs/profileSourceArtifact" }
+        "source_airway_mask": { "$ref": "#/$defs/profileSourceArtifact" },
+        "source_tissue_mask_pixels": { "$ref": "#/$defs/binaryMaskPixels" },
+        "source_airway_mask_pixels": { "$ref": "#/$defs/binaryMaskPixels" }
       },
       "allOf": [
         {
@@ -316,7 +332,9 @@
               "tissue_foreground_px_before_airway_exclusion",
               "airway_foreground_px",
               "source_tissue_mask",
-              "source_airway_mask"
+              "source_airway_mask",
+              "source_tissue_mask_pixels",
+              "source_airway_mask_pixels"
             ],
             "properties": {
               "authority": { "const": "content_bound_external_profile_and_binary_masks" },
@@ -340,7 +358,9 @@
                 { "required": ["tissue_foreground_px_before_airway_exclusion"] },
                 { "required": ["airway_foreground_px"] },
                 { "required": ["source_tissue_mask"] },
-                { "required": ["source_airway_mask"] }
+                { "required": ["source_airway_mask"] },
+                { "required": ["source_tissue_mask_pixels"] },
+                { "required": ["source_airway_mask_pixels"] }
               ]
             }
           }

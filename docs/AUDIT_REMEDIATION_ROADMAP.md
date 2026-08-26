@@ -89,13 +89,22 @@ requires uniform indexed provenance across every mouse in a panel.
 Stage 1 now records the acquisition metadata channel names and requires one
 position-specific full-match pattern per acquired channel. It content-binds the
 complete Olympus VSI/ETS package and exact Stage 1 script. Its automatic mode
-publishes the exact DAPI/Otsu engineering raster; its external-profile mode
-requires exact binary tissue and airway masks in the selected-series grid and
-publishes `tissue AND NOT airway`. Stage 2 re-hashes all of this. Source metadata
-still cannot prove that a 488/FITC channel contains the panel-declared marker,
-and an accepted external profile does not prove expert review. Biological stain
-identity, reviewed masks, prospective calibration, an uncapped run, and a
-reviewed endpoint specification remain mandatory before scientific promotion.
+publishes the exact DAPI/Otsu engineering detection raster and binds the
+post-cleanup sampling geometry through the candidate/tile ROI ledgers; its
+external-profile mode requires exact binary tissue and airway masks in the
+selected-series grid and publishes `tissue AND NOT airway`. Stage 2 re-hashes
+all original artifacts and independently decodes canonical row-major uint8
+pixel sidecars to verify dimensions, binary values, foreground counts, airway
+subset, and `tissue AND NOT airway` across every slide in the closed profile.
+Because those sidecars are required evidence, the producer contract is Stage 1
+manifest schema `1.3`, and the incompatible consumer/output contract is Stage 2
+run-index schema `1.4.0` with its versioned schema URI. Stage 2 fails closed on
+Stage 1 `1.2` and Stage 2 `1.3.0` artifacts.
+Source metadata still cannot prove that a 488/FITC channel contains
+the panel-declared marker, and an accepted external profile does not prove
+expert review. Biological stain identity, reviewed masks, prospective
+calibration, an uncapped run, and a reviewed endpoint specification remain
+mandatory before scientific promotion.
 
 | Track | Intended estimand | Required boundary |
 |---|---|---|

@@ -7,7 +7,8 @@
 // first half is launcher/IFQuantLauncher.cs, which keeps every v1.7.2
 // control, tooltip and behaviour unchanged. This file adds:
 //
-//   * the route selector, with route 3 visible and NOT selectable;
+//   * the route selector, with route 3 biological execution NOT selectable
+//     and a separate engineering/review-tools screen;
 //   * the extra tool/location rows routes 2 needs;
 //   * the per-channel threshold grid (H2) and the nuclei floor (H3);
 //   * the live gate summary that sits directly above the Run button;
@@ -41,6 +42,7 @@ namespace IFQuantLauncher
         private ComboBox routeBox;
         private Label routeHelpLabel;
         private Label routeUnavailableLabel;
+        private Button heReviewToolsButton;
         private ComboBox tierBox;
         private ComboBox invocationBox;
 
@@ -191,7 +193,12 @@ namespace IFQuantLauncher
 
             if (routeBox == null || routeBox.Items.Count != 4) return 62;
             if (gateSummaryLabel == null || measurementGroup == null ||
-                toolsGroup == null || thresholdTable == null) return 62;
+                toolsGroup == null || thresholdTable == null ||
+                heReviewToolsButton == null) return 62;
+            if (heReviewToolsButton.Visible == LauncherBuild.BrightfieldRouteEnabled ||
+                heReviewToolsButton.Text.IndexOf(
+                    "no biological analysis",
+                    StringComparison.OrdinalIgnoreCase) < 0) return 62;
 
             // The v1.7.2 controls must still be present and reachable.
             if (inputBox == null || fijiBox == null || outputBaseBox == null ||
@@ -570,6 +577,21 @@ namespace IFQuantLauncher
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             table.Controls.Add(routeUnavailableLabel, 1, 2);
 
+            heReviewToolsButton = new Button();
+            heReviewToolsButton.Text =
+                "Open H&E engineering/review tools (no biological analysis)";
+            heReviewToolsButton.AutoSize = true;
+            heReviewToolsButton.Anchor = AnchorStyles.Left;
+            heReviewToolsButton.Visible = !LauncherBuild.BrightfieldRouteEnabled;
+            heReviewToolsButton.Click += delegate { OpenHeReviewTools(); };
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            table.Controls.Add(heReviewToolsButton, 1, 3);
+            toolTips.SetToolTip(
+                heReviewToolsButton,
+                "Validates the packaged H&E R1/H3 state, builds a blinded development " +
+                "review package, or aggregates a completed review descriptively. It " +
+                "cannot launch Fiji, QuPath, H5/H6 analysis, or biological reporting.");
+
             tierBox = MakeCombo(
                 new string[]
                 {
@@ -580,8 +602,8 @@ namespace IFQuantLauncher
                 "exploratory — numbers may be inspected, never reported as an endpoint",
                 false);
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            table.Controls.Add(MakeLabel("Run tier"), 0, 3);
-            table.Controls.Add(tierBox, 1, 3);
+            table.Controls.Add(MakeLabel("Run tier"), 0, 4);
+            table.Controls.Add(tierBox, 1, 4);
             toolTips.SetToolTip(tierBox,
                 "The tier decides how hard the launcher fails. Confirmatory refuses to start " +
                 "unless every analysis channel carries a frozen, control-derived threshold. " +
@@ -599,8 +621,8 @@ namespace IFQuantLauncher
                     : launcherInvocation,
                 false);
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            table.Controls.Add(MakeLabel("How to start Fiji"), 0, 4);
-            table.Controls.Add(invocationBox, 1, 4);
+            table.Controls.Add(MakeLabel("How to start Fiji"), 0, 5);
+            table.Controls.Add(invocationBox, 1, 5);
             toolTips.SetToolTip(invocationBox,
                 "Legacy mode always uses the launcher exe, because that is what v1.7.2 used. " +
                 "On win-arm64 the Fiji launcher exe is the only one present and is unreliable; " +
@@ -680,6 +702,31 @@ namespace IFQuantLauncher
             }
             lastValidRouteIndex = index;
             OnRouteChanged();
+        }
+
+        private void OpenHeReviewTools()
+        {
+            if (LauncherBuild.BrightfieldRouteEnabled)
+                throw new InvalidOperationException(
+                    "The isolated review-tools entry point is only used while Route 3 " +
+                    "biological execution remains disabled.");
+            try
+            {
+                RuntimePaths runtime = RuntimeBundle.EnsureExtracted();
+                string initialPython = pythonBox == null ? "" : pythonBox.Text.Trim();
+                using (HeReviewForm review = new HeReviewForm(runtime, initialPython))
+                    review.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    "The H&E engineering/review tools could not be opened.\r\n\r\n" +
+                    ex.Message,
+                    "H&E review tools unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
         private void BuildToolsGroup()

@@ -91,8 +91,16 @@ class SyntheticStage2Run:
         self.reference_mask = (
             self.slide_dir / "reference_space" / "automatic_dapi_tissue_raster.tif"
         )
+        self.reference_mask_pixels = (
+            self.slide_dir
+            / "reference_space"
+            / "analysis_tissue_mask_pixels.uint8"
+        )
         self.reference_mask.parent.mkdir(parents=True)
         self.reference_mask.write_bytes(b"synthetic-binary-reference-mask\n")
+        self.reference_mask_pixels.write_bytes(
+            bytes([255]) * 100 + bytes(256 * 128 - 100)
+        )
         self.stage1_script.write_bytes(b"// deterministic fake Stage 1 script\n")
         self.stage2_script.write_bytes(b"// deterministic fake Stage 2 script\n")
 
@@ -106,7 +114,7 @@ class SyntheticStage2Run:
                 "genotype": "WT",
                 "condition": "mock",
                 "panel": "LEFT",
-                "source_vsi": "synthetic.vsi",
+                "source_vsi": "synthetic_slide.vsi",
                 "series_index": "0",
                 "pixel_size_um": "0.5",
                 "pixel_size_um_y": "0.5",
@@ -135,7 +143,7 @@ class SyntheticStage2Run:
                 "genotype": "WT",
                 "condition": "mock",
                 "panel": "LEFT",
-                "source_vsi": "synthetic.vsi",
+                "source_vsi": "synthetic_slide.vsi",
                 "series_index": "0",
                 "pixel_size_um": "0.5",
                 "pixel_size_um_y": "0.5",
@@ -193,7 +201,7 @@ class SyntheticStage2Run:
                 "sha256": hashlib.sha256(b"fake-ets-01").hexdigest(),
             },
             {
-                "relative_path": "synthetic.vsi",
+                "relative_path": "synthetic_slide.vsi",
                 "size_bytes": 12,
                 "sha256": hashlib.sha256(b"fake-vsi-001").hexdigest(),
             },
@@ -204,7 +212,7 @@ class SyntheticStage2Run:
         )
         source_package = {
             "format": "olympus_vsi",
-            "source_vsi": "synthetic.vsi",
+            "source_vsi": "synthetic_slide.vsi",
             "discovery_authority": "bioformats_ImageReader_getUsedFiles",
             "package_hash_algorithm": "sha256_utf8_path_tab_size_tab_sha256_lf",
             "members": source_members,
@@ -213,7 +221,7 @@ class SyntheticStage2Run:
         write_json(
             self.stage1_manifest,
             {
-                "schema_version": "1.2",
+                "schema_version": "1.3",
                 "stage": "wsi_tile_export",
                 "status": "complete",
                 "stage1_script": {
@@ -251,7 +259,7 @@ class SyntheticStage2Run:
                         "sum_core_tissue_mm2": 0.0004,
                         "seam_check_rel_diff": 0.0,
                         "tissue_threshold_otsu": 1.0,
-                        "source_vsi": "synthetic.vsi",
+                        "source_vsi": "synthetic_slide.vsi",
                         "source_package": source_package,
                         "series_index": 0,
                         "series_name": "synthetic analytical series",
@@ -292,6 +300,19 @@ class SyntheticStage2Run:
                                     "name": self.reference_mask.name,
                                     "size_bytes": self.reference_mask.stat().st_size,
                                     "sha256": sha256_file(self.reference_mask),
+                                },
+                            },
+                            "analysis_tissue_mask_pixels": {
+                                "encoding": "row_major_uint8_0_255",
+                                "width": 256,
+                                "height": 128,
+                                "published_relative_path": (
+                                    "reference_space/analysis_tissue_mask_pixels.uint8"
+                                ),
+                                "content": {
+                                    "name": self.reference_mask_pixels.name,
+                                    "size_bytes": self.reference_mask_pixels.stat().st_size,
+                                    "sha256": sha256_file(self.reference_mask_pixels),
                                 },
                             },
                             "content_verified_before_and_after": True,
@@ -758,7 +779,12 @@ class Stage2RunIndexTests(unittest.TestCase):
         document = self.fixture.build()
 
         self.assertEqual(document["status"], "stage2_integrity_complete")
-        self.assertEqual(document["schema_version"], "1.3.0")
+        self.assertEqual(document["schema_version"], "1.4.0")
+        self.assertEqual(
+            document["$schema"],
+            "https://ifquant-lung.invalid/schemas/"
+            "stage2-run-index-1.4.0.schema.json",
+        )
         self.assertEqual([run["role"] for run in document["runs"]], ["shard", "shard"])
         self.assertEqual(document["coverage"]["expected_tile_count"], 2)
         self.assertEqual(document["coverage"]["declared_input_count"], 2)
@@ -817,6 +843,13 @@ class Stage2RunIndexTests(unittest.TestCase):
 
     def test_schema_is_valid_and_accepts_built_index(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        expected_uri = (
+            "https://ifquant-lung.invalid/schemas/"
+            "stage2-run-index-1.4.0.schema.json"
+        )
+        self.assertEqual(schema["$id"], expected_uri)
+        self.assertEqual(schema["properties"]["$schema"]["const"], expected_uri)
+        self.assertEqual(schema["properties"]["schema_version"]["const"], "1.4.0")
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(
             schema, format_checker=FormatChecker()
@@ -825,6 +858,113 @@ class Stage2RunIndexTests(unittest.TestCase):
     def test_reference_space_raster_is_rehashed_before_index_publication(self):
         self.fixture.reference_mask.write_bytes(b"tampered reference mask\n")
         self.assertBuildFails("analysis tissue mask content does not match")
+
+    def test_reference_space_pixel_sidecar_is_exact_binary_and_dimension_bound(self):
+        stage1 = json.loads(self.fixture.stage1_manifest.read_text(encoding="utf-8"))
+        pixel_record = stage1["slides"][0]["reference_space"][
+            "analysis_tissue_mask_pixels"
+        ]
+
+        nonbinary = bytearray(self.fixture.reference_mask_pixels.read_bytes())
+        nonbinary[200] = 1
+        self.fixture.reference_mask_pixels.write_bytes(nonbinary)
+        pixel_record["content"]["sha256"] = sha256_file(
+            self.fixture.reference_mask_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("must contain only 0 and 255")
+
+        self.fixture.reference_mask_pixels.write_bytes(
+            bytes([255]) * 100 + bytes(256 * 128 - 100)
+        )
+        self.fixture.reference_mask_pixels.write_bytes(
+            self.fixture.reference_mask_pixels.read_bytes()[:-1]
+        )
+        pixel_record["content"]["size_bytes"] = (
+            self.fixture.reference_mask_pixels.stat().st_size
+        )
+        pixel_record["content"]["sha256"] = sha256_file(
+            self.fixture.reference_mask_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails(r"byte length does not equal width \* height")
+
+        self.fixture.reference_mask_pixels.write_bytes(
+            bytes([255]) * 100 + bytes(256 * 128 - 100)
+        )
+        pixel_record["content"]["size_bytes"] = (
+            self.fixture.reference_mask_pixels.stat().st_size
+        )
+        pixel_record["content"]["sha256"] = sha256_file(
+            self.fixture.reference_mask_pixels
+        )
+        pixel_record["width"] = 255
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("dimensions disagree with the selected-series")
+
+    def test_reference_space_root_settings_and_downsample_ratio_are_fail_closed(self):
+        original = json.loads(self.fixture.stage1_manifest.read_text(encoding="utf-8"))
+
+        changed = copy.deepcopy(original)
+        changed["schema_version"] = "1.2"
+        write_json(self.fixture.stage1_manifest, changed)
+        self.assertBuildFails("unsupported Stage 1 manifest schema version")
+
+        changed = copy.deepcopy(original)
+        changed["tissue"]["downsample"] = 8.0
+        write_json(self.fixture.stage1_manifest, changed)
+        self.assertBuildFails("tissue profile downsample disagrees")
+
+        changed = copy.deepcopy(original)
+        changed["tissue"]["threshold_method"] = "external_binary_mask"
+        write_json(self.fixture.stage1_manifest, changed)
+        self.assertBuildFails("threshold_method must be Otsu")
+
+        changed = copy.deepcopy(original)
+        changed["tissue"]["downsample"] = 5e-324
+        changed["slides"][0]["reference_space"]["downsample"] = 5e-324
+        write_json(self.fixture.stage1_manifest, changed)
+        self.assertBuildFails("downsample ratio is outside the supported range")
+
+        changed = copy.deepcopy(original)
+        changed["slides"][0]["width"] = 10**500
+        write_json(self.fixture.stage1_manifest, changed)
+        self.assertBuildFails("downsample ratio is outside the supported range")
+
+    def test_automatic_mode_closes_three_slide_sibling_aliases(self):
+        stage1 = json.loads(self.fixture.stage1_manifest.read_text(encoding="utf-8"))
+
+        def rebound_slide(source_slide, source_vsi, slide_stem):
+            rebound = copy.deepcopy(source_slide)
+            prior_source = rebound["source_vsi"]
+            rebound["source_vsi"] = source_vsi
+            rebound["slide_stem"] = slide_stem
+            package = rebound["source_package"]
+            package["source_vsi"] = source_vsi
+            for member in package["members"]:
+                if member["relative_path"] == prior_source:
+                    member["relative_path"] = source_vsi
+            package_lines = "".join(
+                f"{member['relative_path']}\t{member['size_bytes']}\t{member['sha256']}\n"
+                for member in package["members"]
+            )
+            package["package_sha256"] = hashlib.sha256(
+                package_lines.encode("utf-8")
+            ).hexdigest()
+            return rebound
+
+        sibling = rebound_slide(stage1["slides"][0], "sibling.vsi", "sibling")
+        aliased_sibling = rebound_slide(sibling, "third.vsi", "sibling")
+        stage1["slides"].extend([sibling, aliased_sibling])
+        write_json(self.fixture.stage1_manifest, stage1)
+
+        self.assertBuildFails("slide_stem disagrees with source_vsi")
+
+        stage1["slides"][-1] = rebound_slide(
+            sibling, "SIBLING.VSI", "SIBLING"
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("repeats source_vsi case-insensitively")
 
     def test_external_tissue_minus_airway_profile_is_bound_and_reconciled(self):
         stage1 = json.loads(self.fixture.stage1_manifest.read_text(encoding="utf-8"))
@@ -838,9 +978,20 @@ class Stage2RunIndexTests(unittest.TestCase):
         source_tissue = reference_dir / "source_tissue_mask.bin"
         source_airway = reference_dir / "source_airway_mask.bin"
         final_tissue = reference_dir / "analysis_tissue_minus_airway_mask.tif"
+        source_tissue_pixels = reference_dir / "source_tissue_mask_pixels.uint8"
+        source_airway_pixels = reference_dir / "source_airway_mask_pixels.uint8"
+        final_tissue_pixels = self.fixture.reference_mask_pixels
         source_tissue.write_bytes(profile_tissue.read_bytes())
         source_airway.write_bytes(profile_airway.read_bytes())
         final_tissue.write_bytes(b"binary-final-mask\n")
+        tissue_pixel_payload = bytes([255]) * 100 + bytes(256 * 128 - 100)
+        airway_pixel_payload = bytes([255]) * 10 + bytes(256 * 128 - 10)
+        analysis_pixel_payload = bytes(10) + bytes([255]) * 90 + bytes(
+            256 * 128 - 100
+        )
+        source_tissue_pixels.write_bytes(tissue_pixel_payload)
+        source_airway_pixels.write_bytes(airway_pixel_payload)
+        final_tissue_pixels.write_bytes(analysis_pixel_payload)
 
         package_sha = stage1["slides"][0]["source_package"]["package_sha256"]
         profile = {
@@ -856,7 +1007,7 @@ class Stage2RunIndexTests(unittest.TestCase):
             "mask_logic": "tissue_foreground_minus_airway_foreground",
             "slides": [
                 {
-                    "source_vsi": "synthetic.vsi",
+                    "source_vsi": "synthetic_slide.vsi",
                     "source_package_sha256": package_sha,
                     "series_index": 0,
                     "full_resolution_width": 4096,
@@ -933,11 +1084,38 @@ class Stage2RunIndexTests(unittest.TestCase):
                 "published_relative_path": "reference_space/source_airway_mask.bin",
                 "content": content(source_airway),
             },
+            "source_tissue_mask_pixels": {
+                "encoding": "row_major_uint8_0_255",
+                "width": 256,
+                "height": 128,
+                "published_relative_path": (
+                    "reference_space/source_tissue_mask_pixels.uint8"
+                ),
+                "content": content(source_tissue_pixels),
+            },
+            "source_airway_mask_pixels": {
+                "encoding": "row_major_uint8_0_255",
+                "width": 256,
+                "height": 128,
+                "published_relative_path": (
+                    "reference_space/source_airway_mask_pixels.uint8"
+                ),
+                "content": content(source_airway_pixels),
+            },
             "tissue_mask": {
                 "published_relative_path": (
                     "reference_space/analysis_tissue_minus_airway_mask.tif"
                 ),
                 "content": content(final_tissue),
+            },
+            "analysis_tissue_mask_pixels": {
+                "encoding": "row_major_uint8_0_255",
+                "width": 256,
+                "height": 128,
+                "published_relative_path": (
+                    "reference_space/analysis_tissue_mask_pixels.uint8"
+                ),
+                "content": content(final_tissue_pixels),
             },
             "content_verified_before_and_after": True,
         }
@@ -953,6 +1131,185 @@ class Stage2RunIndexTests(unittest.TestCase):
             format_checker=FormatChecker(),
         ).validate(document)
 
+        stage1["tissue"]["threshold_method"] = "Otsu"
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("threshold_method must be external_binary_mask")
+        stage1["tissue"]["threshold_method"] = "external_binary_mask"
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.fixture.build()
+
+        # A Stage 2 index targets one slide directory, but the external profile
+        # is a closed multi-slide authority.  An inconsistent mask ledger on a
+        # different slide must therefore fail the current slide's build too.
+        second_slide_dir = self.fixture.root / "unrelated"
+        second_reference_dir = second_slide_dir / "reference_space"
+        second_reference_dir.mkdir(parents=True)
+        second_source_tissue = second_reference_dir / source_tissue.name
+        second_source_airway = second_reference_dir / source_airway.name
+        second_final_tissue = second_reference_dir / final_tissue.name
+        second_source_tissue_pixels = second_reference_dir / source_tissue_pixels.name
+        second_source_airway_pixels = second_reference_dir / source_airway_pixels.name
+        second_final_tissue_pixels = second_reference_dir / final_tissue_pixels.name
+        second_source_tissue.write_bytes(source_tissue.read_bytes())
+        second_source_airway.write_bytes(source_airway.read_bytes())
+        second_final_tissue.write_bytes(final_tissue.read_bytes())
+        second_source_tissue_pixels.write_bytes(source_tissue_pixels.read_bytes())
+        second_source_airway_pixels.write_bytes(source_airway_pixels.read_bytes())
+        second_final_tissue_pixels.write_bytes(final_tissue_pixels.read_bytes())
+
+        second_slide = copy.deepcopy(stage1["slides"][0])
+        second_slide["slide_stem"] = second_slide_dir.name
+        second_slide["source_vsi"] = "unrelated.vsi"
+        second_package = second_slide["source_package"]
+        second_package["source_vsi"] = "unrelated.vsi"
+        for member in second_package["members"]:
+            if member["relative_path"] == "synthetic_slide.vsi":
+                member["relative_path"] = "unrelated.vsi"
+        package_lines = "".join(
+            f"{member['relative_path']}\t{member['size_bytes']}\t{member['sha256']}\n"
+            for member in second_package["members"]
+        )
+        second_package["package_sha256"] = hashlib.sha256(
+            package_lines.encode("utf-8")
+        ).hexdigest()
+        second_reference = second_slide["reference_space"]
+        second_reference["source_tissue_mask"]["content"] = content(
+            second_source_tissue
+        )
+        second_reference["source_airway_mask"]["content"] = content(
+            second_source_airway
+        )
+        second_reference["tissue_mask"]["content"] = content(second_final_tissue)
+        second_reference["source_tissue_mask_pixels"]["content"] = content(
+            second_source_tissue_pixels
+        )
+        second_reference["source_airway_mask_pixels"]["content"] = content(
+            second_source_airway_pixels
+        )
+        second_reference["analysis_tissue_mask_pixels"]["content"] = content(
+            second_final_tissue_pixels
+        )
+
+        second_profile_slide = copy.deepcopy(profile["slides"][0])
+        second_profile_slide["source_vsi"] = "unrelated.vsi"
+        second_profile_slide["source_package_sha256"] = second_package[
+            "package_sha256"
+        ]
+        profile["slides"].append(second_profile_slide)
+        stage1["slides"].append(second_slide)
+        write_json(profile_path, profile)
+        stage1["tissue"]["reference_mask_profile"]["content"] = content(
+            profile_path
+        )
+        for slide in stage1["slides"]:
+            slide["reference_space"]["profile_sha256"] = sha256_file(profile_path)
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.fixture.build()
+
+        # Three slides are required to expose an alias between two siblings
+        # that does not collide with the slide currently being indexed.
+        third_slide = copy.deepcopy(second_slide)
+        third_slide["source_vsi"] = "third.vsi"
+        third_slide["slide_stem"] = second_slide["slide_stem"]
+        third_package = third_slide["source_package"]
+        third_package["source_vsi"] = "third.vsi"
+        for member in third_package["members"]:
+            if member["relative_path"] == "unrelated.vsi":
+                member["relative_path"] = "third.vsi"
+        third_package_lines = "".join(
+            f"{member['relative_path']}\t{member['size_bytes']}\t{member['sha256']}\n"
+            for member in third_package["members"]
+        )
+        third_package["package_sha256"] = hashlib.sha256(
+            third_package_lines.encode("utf-8")
+        ).hexdigest()
+        third_profile_slide = copy.deepcopy(second_profile_slide)
+        third_profile_slide["source_vsi"] = "third.vsi"
+        third_profile_slide["source_package_sha256"] = third_package["package_sha256"]
+        stage1["slides"].append(third_slide)
+        profile["slides"].append(third_profile_slide)
+        write_json(profile_path, profile)
+        stage1["tissue"]["reference_mask_profile"]["content"] = content(profile_path)
+        for declared_slide in stage1["slides"]:
+            declared_slide["reference_space"]["profile_sha256"] = sha256_file(
+                profile_path
+            )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("slide_stem disagrees with source_vsi")
+
+        stage1["slides"].pop()
+        profile["slides"].pop()
+        write_json(profile_path, profile)
+        stage1["tissue"]["reference_mask_profile"]["content"] = content(profile_path)
+        for declared_slide in stage1["slides"]:
+            declared_slide["reference_space"]["profile_sha256"] = sha256_file(
+                profile_path
+            )
+
+        # Re-hashing a semantically wrong sibling sidecar cannot make it valid.
+        wrong_airway_pixels = bytearray(second_source_airway_pixels.read_bytes())
+        wrong_airway_pixels[100] = 255
+        second_source_airway_pixels.write_bytes(wrong_airway_pixels)
+        second_reference["source_airway_mask_pixels"]["content"] = content(
+            second_source_airway_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("airway pixels are not a subset of tissue")
+        second_source_airway_pixels.write_bytes(airway_pixel_payload)
+        second_reference["source_airway_mask_pixels"]["content"] = content(
+            second_source_airway_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.fixture.build()
+
+        wrong_analysis_pixels = bytearray(second_final_tissue_pixels.read_bytes())
+        wrong_analysis_pixels[10] = 0
+        wrong_analysis_pixels[100] = 255
+        second_final_tissue_pixels.write_bytes(wrong_analysis_pixels)
+        second_reference["analysis_tissue_mask_pixels"]["content"] = content(
+            second_final_tissue_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("analysis pixels do not equal tissue AND NOT airway")
+        second_final_tissue_pixels.write_bytes(analysis_pixel_payload)
+        second_reference["analysis_tissue_mask_pixels"]["content"] = content(
+            second_final_tissue_pixels
+        )
+
+        nonbinary_tissue_pixels = bytearray(second_source_tissue_pixels.read_bytes())
+        nonbinary_tissue_pixels[200] = 1
+        second_source_tissue_pixels.write_bytes(nonbinary_tissue_pixels)
+        second_reference["source_tissue_mask_pixels"]["content"] = content(
+            second_source_tissue_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails("must contain only 0 and 255")
+        second_source_tissue_pixels.write_bytes(tissue_pixel_payload)
+        second_reference["source_tissue_mask_pixels"]["content"] = content(
+            second_source_tissue_pixels
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.fixture.build()
+
+        second_reference["source_tissue_mask"]["profile_relative_path"] = (
+            "profile_masks/different-tissue.tif"
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+        self.assertBuildFails(
+            "unrelated.vsi.*source_tissue_mask disagrees with the published"
+        )
+
+        stage1["slides"].pop()
+        profile["slides"].pop()
+        write_json(profile_path, profile)
+        stage1["tissue"]["reference_mask_profile"]["content"] = content(
+            profile_path
+        )
+        stage1["slides"][0]["reference_space"]["profile_sha256"] = sha256_file(
+            profile_path
+        )
+        write_json(self.fixture.stage1_manifest, stage1)
+
         source_airway.write_bytes(b"tampered-airway\n")
         self.assertBuildFails("source_airway_mask content does not match")
 
@@ -964,7 +1321,7 @@ class Stage2RunIndexTests(unittest.TestCase):
             profile_path
         )
         write_json(self.fixture.stage1_manifest, stage1)
-        self.assertBuildFails("profile series_index disagrees")
+        self.assertBuildFails("profile slide .* series_index disagrees")
 
         profile["slides"][0]["series_index"] = 0
         write_json(profile_path, profile)
@@ -1909,6 +2266,19 @@ class Stage2RunIndexTests(unittest.TestCase):
     def test_tampered_index_and_tampered_artifact_are_rejected(self):
         document = self.fixture.build()
         index_path = self.fixture.publish(document)
+
+        legacy_version = copy.deepcopy(document)
+        legacy_version["schema_version"] = "1.3.0"
+        rehash_index(legacy_version)
+        write_json(index_path, legacy_version)
+        with self.assertRaisesRegex(Stage2IndexError, "unsupported Stage 2 index version"):
+            validate_stage2_index(
+                index_path,
+                slide_dir=self.fixture.slide_dir,
+                stage1_manifest=self.fixture.stage1_manifest,
+                stage2_script=self.fixture.stage2_script,
+            )
+
         altered = copy.deepcopy(document)
         altered["coverage"]["expected_tile_count"] = 999
         write_json(index_path, altered)
@@ -2103,6 +2473,7 @@ class Stage2RunIndexTests(unittest.TestCase):
         stage1 = json.loads(self.fixture.stage1_manifest.read_text(encoding="utf-8"))
         stage1["slides"].append({
             "slide_stem": "declared_but_missing",
+            "source_vsi": "declared_but_missing.vsi",
             "n_tiles": 1,
             "coverage_complete": True,
             "dry_run": False,

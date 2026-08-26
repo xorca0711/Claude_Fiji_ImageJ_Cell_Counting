@@ -1,5 +1,11 @@
 # AI handoff — machine-oriented project context
 
+> **Supersession notice (2026-08-26).** This file is a historical 2026-08-12
+> environment and failure-mode snapshot. Resume current engineering work from
+> [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md)
+> and use [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md) for
+> current claim authority.
+>
 > **Purpose.** A dense, factual *technical* context transfer for an AI agent picking up this
 > project with no conversation history. Written to be read start-to-finish.
 > State reconciled 2026-08-12 against baseline `main` commit `e60b7e6`, the
@@ -97,7 +103,7 @@ These caused real failures. Check before assuming.
 | KRT5⁺ area, mouse level | M2 14.11 %, M4-1 11.98 % (PR8) vs M4-2 0.000 %, M6 0.003 % |
 | Nucleus density, post-fix | **15,393.3 /mm²** pooled (was 152.5 → ~101× undercount) |
 | Tile→slide reconciliation | **2.1e-16** |
-| Launcher legacy equivalence | **84 checks, 0 failures**, runnable from a clone |
+| Launcher legacy equivalence | **85 checks, 0 failures**, runnable from a clone |
 
 **Two claims executable from a clean clone with no data:**
 ```

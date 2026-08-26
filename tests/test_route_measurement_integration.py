@@ -184,6 +184,7 @@ def write_sealed_classic_direct_run(root: Path, summary: Path, rows):
         "engineScript": engine_content,
         "resolvedConfigSha256": config_sha256,
         "stardistAuthority": runtime_authority,
+        "stardistModelChoice": None,
         "stardistModelSha256": None,
         "stardistModelAuthority": "not_applicable_classic",
     }
@@ -211,6 +212,7 @@ def write_sealed_classic_direct_run(root: Path, summary: Path, rows):
                     "engine_script": engine_content,
                     "resolved_config_sha256": config_sha256,
                     "segmenter": "classic",
+                    "stardist_model_choice": None,
                     "stardist_model_sha256": None,
                     "stardist_model_authority": "not_applicable_classic",
                     "stardist_runtime": {**runtime_authority, "label_outputs": []},
@@ -349,6 +351,7 @@ def upgrade_sealed_run_to_stardist(root: Path, manifest_path: Path, spec):
             "segmenter": "stardist",
             "resolvedConfigSha256": config_sha256,
             "stardistAuthority": authority,
+            "stardistModelChoice": authority["model_choice"],
             "stardistModelSha256": model_content["sha256"],
             "stardistModelAuthority": authority["authority"],
         }
@@ -363,13 +366,29 @@ def upgrade_sealed_run_to_stardist(root: Path, manifest_path: Path, spec):
     for image in manifest["images"]:
         params_path = root / image["params_relative_path"]
         params = json.loads(params_path.read_text(encoding="utf-8"))
+        params_runtime = {
+            key: authority[key]
+            for key in (
+                "active",
+                "authority",
+                "api_command",
+                "model_choice",
+                "model_content",
+                "model_archive",
+                "runtime_manifest_content",
+                "runtime_profile_id",
+                "runtime_artifacts",
+                "class_bindings",
+            )
+        }
         params.update(
             {
                 "resolved_config_sha256": config_sha256,
                 "segmenter": "stardist",
+                "stardist_model_choice": authority["model_choice"],
                 "stardist_model_sha256": model_content["sha256"],
                 "stardist_model_authority": authority["authority"],
-                "stardist_runtime": {**authority, "label_outputs": []},
+                "stardist_runtime": {**params_runtime, "label_outputs": []},
             }
         )
         params_path.write_text(
@@ -482,7 +501,7 @@ def wsi_row():
         "KRT5_pod_area_frac": "0.25",
         "aggregation_contract_version": "2.0.0",
         "stage2_source_mode": "explicit_hashed_index",
-        "stage2_index_schema_version": "1.3.0",
+        "stage2_index_schema_version": "1.4.0",
         "stage1_profile_sha256": "3" * 64,
         "stage1_script_sha256": "4" * 64,
         "stage1_source_metadata_sha256": "5" * 64,
@@ -795,6 +814,7 @@ class Stage4MeasurementRecordCliTests(unittest.TestCase):
             "incomplete",
             "capped",
             "failure",
+            "boolean_count",
         )
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
@@ -833,6 +853,9 @@ class Stage4MeasurementRecordCliTests(unittest.TestCase):
                 elif case == "failure":
                     manifest["failure_count"] = 1
                     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                elif case == "boolean_count":
+                    manifest["failure_count"] = False
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                 spec_path.write_text(
                     json.dumps(spec, indent=2) + "\n", encoding="utf-8"
                 )
@@ -862,6 +885,26 @@ class Stage4MeasurementRecordCliTests(unittest.TestCase):
             result = self.run_direct(root, summary, spec_path, manifest_path)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("model", result.stderr.lower())
+            self.assert_no_stage4_publication(root)
+
+    def test_direct_profile_authority_mismatch_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            summary = root / "run_summary.csv"
+            spec_path = root / "measurement-spec.json"
+            rows = direct_rows()
+            self.write_csv(summary, rows)
+            manifest_path, spec = write_sealed_classic_direct_run(
+                root, summary, rows
+            )
+            spec["profiles"][0]["provenance"]["code_revision"] = "0" * 64
+            spec_path.write_text(
+                json.dumps(spec, indent=2) + "\n", encoding="utf-8"
+            )
+            result = self.run_direct(root, summary, spec_path, manifest_path)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("code_revision", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
             self.assert_no_stage4_publication(root)
 
     def test_cli_fails_closed_before_csv_publication_on_bad_mapping(self):

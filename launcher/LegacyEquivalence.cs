@@ -528,10 +528,10 @@ namespace IFQuantLauncher.LegacyCheck
 
             // ---- (c) the new source's route 4 branch ---------------------
             Console.WriteLine();
-            Console.WriteLine("[c] The v1.8.0 source cannot quietly stop being legacy");
+            Console.WriteLine("[c] The current post-v1.7.2 source cannot quietly stop being legacy");
             if (!File.Exists(v180Source))
             {
-                Check(false, "v1.8.0 source is readable at " + v180Source);
+                Check(false, "current source is readable at " + v180Source);
             }
             else
             {
@@ -547,7 +547,7 @@ namespace IFQuantLauncher.LegacyCheck
                 // legitimately READS env["IFQ_MIN_INCLUDED_NUCLEI"] to prove
                 // routes 1/2 do write it. `[^=]` keeps `!=` and `==` out.
                 Check(!Regex.IsMatch(source, "env\\[\"IFQ_MIN_INCLUDED_NUCLEI\"\\]\\s*=[^=]"),
-                      "the v1.8.0 launcher assigns IFQ_MIN_INCLUDED_NUCLEI nowhere " +
+                      "the current launcher assigns IFQ_MIN_INCLUDED_NUCLEI nowhere " +
                       "(only RunEnvironment.BuildStage2 does, and route 4 does not go through it)");
                 Check(source.IndexOf("EnvironmentApply.Apply", StringComparison.Ordinal) >= 0,
                       "the launcher applies the environment through the code this harness runs");

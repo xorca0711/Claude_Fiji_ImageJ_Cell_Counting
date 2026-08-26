@@ -171,8 +171,11 @@ Stage 1 has two explicit reference-space modes:
 
 1. With `IFQ_WSI_REFERENCE_MASK_PROFILE` blank, Stage 1 constructs one global
    DAPI/Otsu raster. It is always labelled `engineering_unreviewed`, explicitly
-   records that airway exclusion is unavailable, and publishes the exact final
-   raster under `reference_space/` for later re-hashing.
+   records that airway exclusion is unavailable, and publishes the exact
+   threshold/morphology raster under `reference_space/` for later re-hashing.
+   Optional fragment and interior-ring cleanup is applied to the traced geometry;
+   the exhaustive candidate ledger and content-bound tile ROIs record that final
+   sampling geometry and reconcile it against the declared slide tissue area.
 2. With `IFQ_WSI_REFERENCE_MASK_PROFILE` set, the closed JSON profile must
    identify every input slide by filename, exact Bio-Formats source-package
    SHA-256, selected series, full-resolution dimensions, downsample grid, and
@@ -181,6 +184,23 @@ Stage 1 has two explicit reference-space modes:
    tissue foreground. The analysis raster is the exact pixelwise result
    `tissue AND NOT airway`; Stage 1 does not blur or morphologically alter an
    externally supplied reference mask.
+
+For both modes, Stage 1 also publishes an atomic canonical pixel sidecar for
+the analysis mask: exactly one unsigned byte per selected-series downsample-grid
+pixel, row-major, with values restricted to `0` and `255`. External mode
+publishes the same canonical sidecars for the decoded source tissue and airway
+masks while retaining the original profile-bound image copies. Stage 2 re-hashes
+and decodes these sidecars for every slide in the closed profile, verifies exact
+dimensions and byte length, recomputes foreground counts and airway subset
+semantics, and requires the analysis payload to equal `tissue AND NOT airway`
+pixel-for-pixel.
+
+The required pixel-sidecar records define Stage 1 manifest schema `1.3`;
+Stage 2 rejects older Stage 1 manifests, including `1.2`, rather than guessing
+whether equivalent evidence exists. The corresponding Stage 2 run-index
+contract is `1.4.0`, identified by
+`https://ifquant-lung.invalid/schemas/stage2-run-index-1.4.0.schema.json`.
+Indexes labelled `1.3.0` use the superseded shape and are rejected.
 
 The profile schema is
 [`schemas/wsi-reference-mask-profile.schema.json`](../schemas/wsi-reference-mask-profile.schema.json).
@@ -236,7 +256,7 @@ marker identity still comes from the frozen acquisition protocol and explicit
 panel mapping.
 
 ```powershell
-$env:IFQ_WSI_INPUT  = "D:\Microscopy_Images\20260806_CW_Slidescanner\20260806_CW"
+$env:IFQ_WSI_INPUT  = "D:\path\to\raw_slides"
 $env:IFQ_WSI_OUTPUT = "D:\IFQ_Runs\<run_name>"
 # Optional only after a profile and both masks have been prepared and reviewed:
 # $env:IFQ_WSI_REFERENCE_MASK_PROFILE = "<reviewed-profile>.json"
@@ -309,7 +329,8 @@ the engine loops over files with a per-file try/catch and one bad tile never
 aborts the batch. Use `scripts/Invoke-Stage2Sharded.ps1` to split the tile
 folder into N hard-linked shards (hard links cost no disk) and run N Fiji
 processes. After all processes finish, the launcher writes a content-addressed
-`stage2_run_index.json`. It binds every shard's samplesheet, exit status,
+`stage2_run_index.json` using schema `1.4.0`. It binds every shard's
+samplesheet, exit status,
 manifest, summary, tile/ROI and candidate-ledger hashes, exact per-image
 parameter records, normalized runtime profile, external configuration bytes,
 engine hash, and declared ordered channel map. Stage 3 reads only those
@@ -461,7 +482,7 @@ The plumbing is verified end to end on real data (QuPath 0.7.0, Fiji/ImageJ
 | prospective raw source authority | exact Bio-Formats used-file package and Stage 1 script hashed before and after export |
 | automatic reference-space smoke | real M2 series 2 (`59465 x 41119`, 4 channels, 0.345 µm/px); published `3717 x 2570` DAPI engineering raster re-hashed successfully |
 | external reference-space smoke | exact profile/tissue/airway bytes accepted; binary/subset logic reconciled `2,954,901` tissue pixels, `0` airway pixels, and `2,954,901` analysis pixels |
-| Stage 2 reference-space validation | profile, source-mask, final-mask, dimensions, area, review state, and source-package identity revalidated; mask tampering rejected |
+| Stage 2 reference-space validation | profile, original source/final mask artifacts, canonical pixel sidecars, dimensions, binary values, foreground counts, airway subset, pixelwise subtraction, review state, and source-package identity revalidated across every declared slide; mask tampering rejected |
 
 That last row is the point: the tile count never becomes the n.
 

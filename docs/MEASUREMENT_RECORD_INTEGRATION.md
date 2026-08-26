@@ -112,8 +112,8 @@ placeholder hashes and identifiers with the exact reviewed profile values.
         "assignment_profile_id": null
       },
       "provenance": {
-        "code_revision": "<engine revision or content hash>",
-        "config_sha256": "<64 lowercase hex characters>",
+        "code_revision": "<run_manifest.engine_script.sha256>",
+        "config_sha256": "<run_manifest.config.resolvedConfigSha256>",
         "measurement_profile_sha256": "<64 lowercase hex characters>",
         "run_id": "<portable run identifier>",
         "additional_inputs": []
@@ -149,6 +149,10 @@ placeholder hashes and identifiers with the exact reviewed profile values.
 profile disagrees, the complete attempt fails; rows are never silently dropped.
 Use a separate explicit profile when panels have different channel order,
 endpoint availability, measurement hashes, or compartment contracts.
+For a classic-segmentation run, `segmentation_model` must be `null`. For a
+StarDist run it must be the schema-v2 model object, with `model_sha256` equal to
+the manifest's sealed model hash and `profile_id` equal to the sealed runtime
+profile ID; the provider and model ID remain explicit reviewed labels.
 
 ## Additional content-bound provenance
 

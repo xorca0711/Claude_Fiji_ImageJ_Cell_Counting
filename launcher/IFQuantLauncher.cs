@@ -3789,6 +3789,11 @@ namespace IFQuantLauncher
         public string Stage2IndexBuilderPath;
         public string Stage3ScriptPath;
         public string MouseAggregatorPath;
+        public string HePipelinePath;
+        public string HeStudyPath;
+        public string HeRubricPath;
+        public string HeStainProfilePath;
+        public string MeasurementSchemaPath;
         public string PipelineSha256;
         public string RegistrySha256;
         public string BundleSha256;
@@ -3818,6 +3823,12 @@ namespace IFQuantLauncher
             "IFQuant.wsi-reference-mask-profile.schema.json";
         private const string StarDistRuntimeSchemaResource =
             "IFQuant.stardist-runtime-manifest.schema.json";
+        private const string HePipelineResource = "IFQuant.he_pipeline.py";
+        private const string HeStudyResource = "IFQuant.g_surf_he_20260812.json";
+        private const string HeRubricResource =
+            "IFQuant.he_pathology_review_rubric.json";
+        private const string HeStainProfileResource =
+            "IFQuant.g_surf_he_20260812_reviewed_locked_v1.json";
 
         // Increment only if the publication/validation format changes. The
         // resource bytes are the remaining identity, so two different builds
@@ -3963,7 +3974,15 @@ namespace IFQuantLauncher
                 { WsiReferenceMaskSchemaResource,
                   "schemas/wsi-reference-mask-profile.schema.json" },
                 { StarDistRuntimeSchemaResource,
-                  "schemas/stardist-runtime-manifest.schema.json" }
+                  "schemas/stardist-runtime-manifest.schema.json" },
+                { HePipelineResource, "scripts/he_pipeline.py" },
+                { HeStudyResource,
+                  "config/studies/g_surf_he_20260812.json" },
+                { HeRubricResource,
+                  "config/brightfield/he_pathology_review_rubric.json" },
+                { HeStainProfileResource,
+                  "config/brightfield/he_stain_profiles/" +
+                  "g_surf_he_20260812_reviewed_locked_v1.json" }
             };
 
             Assembly assembly = Assembly.GetExecutingAssembly();
@@ -4092,17 +4111,19 @@ namespace IFQuantLauncher
                         (File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0)
                         File.Delete(file);
                 }
-                string[] knownDirectories = new string[]
+                List<string> knownDirectories = ExpectedDirectories(staging, resources);
+                knownDirectories.Sort(delegate(string left, string right)
                 {
-                    "config", "scripts", "ifquant", "schemas"
-                };
-                foreach (string name in knownDirectories)
-                {
-                    string directory = Path.Combine(staging, name);
-                    if (Directory.Exists(directory) &&
+                    int byLength = right.Length.CompareTo(left.Length);
+                    return byLength != 0 ? byLength :
+                        StringComparer.OrdinalIgnoreCase.Compare(right, left);
+                });
+                foreach (string directory in knownDirectories)
+                    if (!string.Equals(directory, staging,
+                                       StringComparison.OrdinalIgnoreCase) &&
+                        Directory.Exists(directory) &&
                         (File.GetAttributes(directory) & FileAttributes.ReparsePoint) == 0)
                         Directory.Delete(directory, false);
-                }
                 Directory.Delete(staging, false);
             }
             catch
@@ -4327,6 +4348,17 @@ namespace IFQuantLauncher
                 root, "scripts/build_stage2_run_index.py");
             paths.Stage3ScriptPath = RuntimePath(root, "aggregate_tiles_to_slide.py");
             paths.MouseAggregatorPath = RuntimePath(root, "aggregate_to_mouse.py");
+            paths.HePipelinePath = RuntimePath(root, "scripts/he_pipeline.py");
+            paths.HeStudyPath = RuntimePath(
+                root, "config/studies/g_surf_he_20260812.json");
+            paths.HeRubricPath = RuntimePath(
+                root, "config/brightfield/he_pathology_review_rubric.json");
+            paths.HeStainProfilePath = RuntimePath(
+                root,
+                "config/brightfield/he_stain_profiles/" +
+                "g_surf_he_20260812_reviewed_locked_v1.json");
+            paths.MeasurementSchemaPath = RuntimePath(
+                root, "schemas/measurement-record.schema.json");
             paths.PipelineSha256 = ResourceHash(resources, "IF_Quant_Pipeline.groovy");
             paths.RegistrySha256 = ResourceHash(
                 resources, "config/lung_marker_registry.json");
@@ -4576,7 +4608,15 @@ namespace IFQuantLauncher
                 Path.Combine(paths.RuntimeDirectory, "schemas",
                              "wsi-reference-mask-profile.schema.json"),
                 Path.Combine(paths.RuntimeDirectory, "schemas",
-                             "stardist-runtime-manifest.schema.json")
+                             "stardist-runtime-manifest.schema.json"),
+                Path.Combine(paths.RuntimeDirectory, "scripts", "he_pipeline.py"),
+                Path.Combine(paths.RuntimeDirectory, "config", "studies",
+                             "g_surf_he_20260812.json"),
+                Path.Combine(paths.RuntimeDirectory, "config", "brightfield",
+                             "he_pathology_review_rubric.json"),
+                Path.Combine(paths.RuntimeDirectory, "config", "brightfield",
+                             "he_stain_profiles",
+                             "g_surf_he_20260812_reviewed_locked_v1.json")
             };
             foreach (string requiredRuntimeFile in route2RuntimeFiles)
                 if (!File.Exists(requiredRuntimeFile)) return 43;
@@ -5164,6 +5204,7 @@ namespace IFQuantLauncher
             if (!Route2ArgumentSelfTest(left, thresholdMarkers)) return 55;
             if (!ReferenceMaskProfilePathSelfTest() ||
                 !StarDistAuthorityPathSelfTest(left, thresholdMarkers)) return 59;
+            if (!HeReviewContract.SelfTest(paths)) return 60;
             return 0;
         }
 

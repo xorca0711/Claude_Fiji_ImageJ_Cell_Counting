@@ -1,5 +1,9 @@
 # Project state — living handoff
 
+> **Supersession notice (2026-08-26).** This is a historical narrative snapshot
+> last reconciled on 2026-08-12. Resume current engineering work from
+> [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md).
+>
 > **Status: NARRATIVE HANDOFF; subordinate to the project authority.** Current
 > release counts, claim boundaries, and promotion gates are defined in
 > `../authority/project_state.json` and rendered in
@@ -12,9 +16,9 @@
 > `<LOCAL_HE_DATA>`, and the
 > internal G-SURF research scheme (not stored in this repository).
 
-**Update this whenever work is parked.** It exists so a fresh session — or a
-reader with five minutes — can tell what was built, what is validated, and what
-is not.
+This snapshot is preserved for its scientific narrative and historical failure
+analysis. The dated development checkpoint above is the current resumable
+engineering handoff.
 
 ---
 
@@ -271,11 +275,11 @@ responsive WinForms layout and makes the equivalence claim reproducible. The
 v1.9.3 keeps file scope outside the scrolling pane, stabilizes the complete
 Step 1 and Analysis settings group heights, and retains the named preset for
 the validated 20x/2k lung cohort. The build, embedded self-test, UI smoke test,
-and 84-check legacy equivalence pass locally. See
+and 85-check legacy equivalence pass locally. See
 `launcher/README.md`.
 
 **Route 4 is proven equal to v1.7.2 by execution, not assertion.**
-`launcher/legacy_equivalence_report.txt`: **84 checks, 0 failures**, in six
+`launcher/legacy_equivalence_report.txt`: **85 checks, 0 failures**, in seven
 groups — canonical env diff across 7 fixtures, source-drift guards against the
 real v1.7.2 file, "the source cannot quietly stop being legacy", process-level
 diff of what the child process actually receives, command line, and the Advanced

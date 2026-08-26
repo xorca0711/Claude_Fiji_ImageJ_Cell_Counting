@@ -95,6 +95,51 @@ class Stage1IntegritySourceContractTests(unittest.TestCase):
         self.assertIn("existingOutputEntries.length > 0", self.stage1[guard:create])
         self.assertIn("Stage 1 resume is unavailable", self.stage1[guard:run_record])
 
+    def test_reference_profile_and_masks_are_consumed_from_bound_snapshots(self):
+        self.assertIn('def runRecord = [ schema_version: "1.3"', self.stage1)
+        self.assertNotIn('def runRecord = [ schema_version: "1.2"', self.stage1)
+        profile_read = self.stage1.index(
+            "profileBytes = Files.readAllBytes(profileFile.toPath())"
+        )
+        profile_parse = self.stage1.index(
+            "GsonTools.getInstance().fromJson(profileText, Map.class)"
+        )
+        self.assertLess(profile_read, profile_parse)
+        self.assertIn("ContentHash.sha256Bytes(profileBytes)", self.stage1)
+        self.assertIn(
+            "IFQ_WSI_REFERENCE_MASK_PROFILE changed while it was being read",
+            self.stage1,
+        )
+
+        publish_tissue = self.stage1.index(
+            "declared.tissue_mask._file, sourceTissueCopy"
+        )
+        decode_tissue = self.stage1.index(
+            "loadStrictBinaryMask(sourceTissueCopy"
+        )
+        publish_airway = self.stage1.index(
+            "declared.airway_mask._file, sourceAirwayCopy"
+        )
+        decode_airway = self.stage1.index(
+            "loadStrictBinaryMask(sourceAirwayCopy"
+        )
+        self.assertLess(publish_tissue, decode_tissue)
+        self.assertLess(publish_airway, decode_airway)
+        self.assertIn("publishCanonicalMaskPixels", self.stage1)
+        self.assertIn('encoding: "row_major_uint8_0_255"', self.stage1)
+        self.assertIn("output.write(pixels)", self.stage1)
+        self.assertIn("output.flush()", self.stage1)
+        self.assertIn("output.getFD().sync()", self.stage1)
+        self.assertIn("source_tissue_mask_pixels: sourceTissuePixelsRecord", self.stage1)
+        self.assertIn("source_airway_mask_pixels: sourceAirwayPixelsRecord", self.stage1)
+        self.assertIn(
+            "referenceSpaceRecord.analysis_tissue_mask_pixels = analysisPixelsRecord",
+            self.stage1,
+        )
+        self.assertIn(
+            'IFQ_WSI_TISSUE_DOWNSAMPLE must be finite and > 0', self.stage1
+        )
+
     def test_stage1_binds_exact_bioformats_package_and_executed_script(self):
         self.assertIn('envOr("IFQ_WSI_STAGE1_SCRIPT_PATH", "")', self.stage1)
         self.assertIn("ContentHash.sha256File(stage1ScriptFile)", self.stage1)
@@ -184,6 +229,15 @@ class Stage1IntegritySourceContractTests(unittest.TestCase):
         ):
             self.assertIn(field, self.stage2_launcher[preflight_start:shard_mutation])
         self.assertIn("Test-IsJsonInteger", self.stage2_launcher)
+        self.assertIn("$stage1ManifestSchemaVersion = '1.3'", self.stage2_launcher)
+        self.assertIn(
+            "$stage1Document.schema_version -isnot [string]",
+            self.stage2_launcher,
+        )
+        self.assertIn(
+            "[string]$stage1Document.schema_version -cne $stage1ManifestSchemaVersion",
+            self.stage2_launcher,
+        )
         self.assertIn("must contain exactly one slide_stem", self.stage2_launcher)
 
     def test_launcher_and_engine_environment_surfaces_are_not_noops(self):

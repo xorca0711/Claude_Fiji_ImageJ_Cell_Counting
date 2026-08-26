@@ -65,6 +65,7 @@ $ErrorActionPreference = 'Stop'
 # defaults only after script entry so direct CLI use works without spelling
 # out paths that the launcher always passes explicitly.
 $repositoryRoot = [System.IO.Directory]::GetParent($PSScriptRoot).FullName
+$stage1ManifestSchemaVersion = '1.3'
 if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
     $ScriptPath = Join-Path $repositoryRoot 'IF_Quant_Pipeline.groovy'
 }
@@ -992,6 +993,10 @@ try {
     $stage1Document = Get-Content -LiteralPath $stage1Manifest -Raw | ConvertFrom-Json
 } catch {
     throw "Stage 1 manifest is not valid JSON: $stage1Manifest ($($_.Exception.Message))"
+}
+if ($stage1Document.schema_version -isnot [string] -or
+    [string]$stage1Document.schema_version -cne $stage1ManifestSchemaVersion) {
+    throw "Stage 1 manifest schema_version must be exactly '$stage1ManifestSchemaVersion'."
 }
 $slideStem = [System.IO.Path]::GetFileName($OutputRoot)
 $matchingStage1Slides = @(

@@ -32,6 +32,8 @@ class EngineProvenanceContractTests(unittest.TestCase):
 
     def test_engine_atomically_seals_outputs_and_publishes_manifest_last(self):
         self.assertIn("def atomicWriteBytes(File target, byte[] payload)", self.engine)
+        self.assertIn("output.getFD().sync()", self.engine)
+        self.assertNotIn("output.fd.sync()", self.engine)
         self.assertIn("StandardCopyOption.ATOMIC_MOVE", self.engine)
         self.assertIn('run_manifest_schema_version: "2.0.0"', self.engine)
         self.assertIn(
@@ -72,6 +74,12 @@ class EngineProvenanceContractTests(unittest.TestCase):
             self.engine,
         )
 
+    def test_preview_only_run_does_not_quarantine_quantitative_manifest(self):
+        self.assertIn(
+            "if (!DISPLAY_PREVIEW_ONLY && priorRunManifest.isFile())",
+            self.engine,
+        )
+
     def test_stage2_children_override_engine_path_to_verified_snapshot(self):
         inherited = self.stage2.index(
             "Launcher-sealed Stage 2 environment is missing IFQ_ENGINE_SCRIPT_PATH"
@@ -90,6 +98,16 @@ class EngineProvenanceContractTests(unittest.TestCase):
             self.confocal.index(assignment),
             self.confocal.index('--run "$repo\\IF_Quant_Pipeline.groovy"'),
         )
+
+    def test_direct_runner_requires_a_sealed_complete_manifest_for_zero_exit(self):
+        self.assertNotIn("[string]$IncludeRegex", self.confocal)
+        self.assertIn(
+            '$env:IFQ_INCLUDE_REGEX  = ".*20x 2k.*\\.oir"', self.confocal
+        )
+        self.assertIn('$manifestStatus -eq "complete"', self.confocal)
+        self.assertIn('$publicationStatus -eq "sealed_complete"', self.confocal)
+        self.assertIn('$finalExit -eq 0 -and -not $manifestAccepted', self.confocal)
+        self.assertIn('$finalExit = 1', self.confocal)
 
 
 if __name__ == "__main__":
