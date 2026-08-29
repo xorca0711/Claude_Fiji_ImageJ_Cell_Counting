@@ -13,6 +13,12 @@ Study question: does IFN-γ *ligand* knockout change the extent of dysplastic
 KRT5⁺ repair after PR8 influenza injury? Endpoint after Lin et al. 2024
 (*J Clin Invest* 134(19):e176828).
 
+> **Successor architecture:** clean-slate QuPath-first, cell/morphology, and
+> machine-learning trials now belong to the separate **IFQuant-Platform**
+> project. This repository remains the reproducible G-SURF record. The decision,
+> boundaries, and rationale are recorded in
+> [`docs/IFQUANT_PLATFORM_HANDOFF.md`](docs/IFQUANT_PLATFORM_HANDOFF.md).
+
 ```mermaid
 flowchart LR
     V[".vsi whole slide<br/>19.3 GB · exceeds RAM"]
@@ -141,6 +147,8 @@ that artifact contains and what it does and does not establish.
 |---|---|
 | **Machine-readable current authority** | [`docs/generated/AUTHORITY_STATUS.md`](docs/generated/AUTHORITY_STATUS.md) |
 | **Audit-driven architecture and gates** | [`docs/AUDIT_REMEDIATION_ROADMAP.md`](docs/AUDIT_REMEDIATION_ROADMAP.md) |
+| **Practical architecture reform** — backend-neutral numerical contract, separate threshold identity, and staged QuPath conformance route | [`docs/ARCHITECTURE_VNEXT.md`](docs/ARCHITECTURE_VNEXT.md) |
+| **Successor repository handoff** — why new QuPath-first and ML trials are separated from the completed G-SURF record | [`docs/IFQUANT_PLATFORM_HANDOFF.md`](docs/IFQUANT_PLATFORM_HANDOFF.md) |
 | **Current engineering checkpoint** — completed work and remaining external gates | [`docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md`](docs/DEVELOPMENT_CHECKPOINT_2026-08-26.md) |
 | **Historical scientific narrative** — 2026-08-12 snapshot of validated, exploratory, and retracted claims | [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) |
 | **The algorithm** — routing, decision hierarchy, cutoff derivation, Z policy | [`WORKFLOW.md`](WORKFLOW.md) |
@@ -339,6 +347,7 @@ outputs and cannot be indexed for analytical aggregation.
 | `aggregate_tiles_to_slide.py` | Stage 3: declared tile/region outputs → slide, with hash, identity, coverage, and area reconciliation; recursive discovery is diagnostic-only. |
 | `aggregate_to_mouse.py` | Region → mouse → group, area-weighted. Reports `n_mice`. Computes no p-values on purpose. |
 | `ifquant/route_records.py` | Explicit Stage 4 bridge from reviewed panel/endpoint maps to schema-v2 JSONL; validates eligibility before pooling. |
+| `ifquant/measurement_definition.py` | Prospective-only numerical-contract seam: hashes a pure scientific definition, binds a separate threshold set, and resolves a method-instance identity without changing the settled aggregation import closure. |
 | `endpoints/` | Relational endpoints (a relation *between* two markers) evaluated by boolean algebra on masks the engine already wrote. The engine is marker-wise and cannot express this; the endpoint scripts close that gap without modifying it. |
 | `config/endpoints/` | Endpoint specifications as reviewable, diffable data — including the superseded one and why it was superseded. |
 | `config/lung_marker_registry.json` | Marker aliases, localisation, analytical-role defaults. Not a whitelist and not a diagnostic classifier. |

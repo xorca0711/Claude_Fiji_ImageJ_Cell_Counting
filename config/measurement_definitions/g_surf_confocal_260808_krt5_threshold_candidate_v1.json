@@ -1,0 +1,29 @@
+{
+  "$schema": "https://github.com/xorca0711/IFQuant-Lung/schemas/frozen-threshold-set.schema.json",
+  "schema_version": "1.0.0",
+  "threshold_set_type": "ifquant_frozen_threshold_set",
+  "threshold_set_id": "g_surf_confocal_260808_krt5_engineering_reconstruction",
+  "threshold_set_version": "1.0.0",
+  "scientific_definition": {
+    "definition_id": "krt5_positive_area_kernel",
+    "definition_version": "1.0.0",
+    "canonical_sha256": "086d69cf98379a9d685685a3b4785b58c1df163bdd571884f3ebde99978b9e16"
+  },
+  "applicability": {
+    "scope_id": "g_surf_confocal_260808_uint16_identity_reconstruction",
+    "scope_binding": "identifier_only_unattested",
+    "scope_profile_sha256": null,
+    "intensity_representation": "unsigned_integer",
+    "bit_depth": 16,
+    "intensity_transform": "none",
+    "transfer_policy": "declared_scope_only"
+  },
+  "thresholds": [
+    {
+      "threshold_parameter_id": "krt5_positive_intensity",
+      "marker_id": "KRT5",
+      "value": 300,
+      "unit": "native_sample_value"
+    }
+  ]
+}

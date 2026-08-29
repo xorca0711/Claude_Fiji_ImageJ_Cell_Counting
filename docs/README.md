@@ -62,6 +62,8 @@ its brightfield measurements belong in a separate QuPath module.
 | [`generated/AUTHORITY_STATUS.md`](generated/AUTHORITY_STATUS.md) | **GENERATED CURRENT STATUS** | deterministic rendering of the machine-readable claim and route authority |
 | [`DEVELOPMENT_CHECKPOINT_2026-08-26.md`](DEVELOPMENT_CHECKPOINT_2026-08-26.md) | **CURRENT ENGINEERING CHECKPOINT** | completed audit-driven engineering, final verification results, and the remaining external gates |
 | [`AUDIT_REMEDIATION_ROADMAP.md`](AUDIT_REMEDIATION_ROADMAP.md) | **PROPOSED** | three-track architecture, problem-to-remedy map, and measurable acceptance gates |
+| [`ARCHITECTURE_VNEXT.md`](ARCHITECTURE_VNEXT.md) | **CONTRACT A FOUNDATION IMPLEMENTED** | practical backend-neutral reform: pure scientific definition, separate threshold set, method-instance identity, future Stage 2Q boundaries and promotion gates |
+| [`IFQUANT_PLATFORM_HANDOFF.md`](IFQUANT_PLATFORM_HANDOFF.md) | **REFERENCE** | decision and rationale for moving clean-slate QuPath-first, cell/morphology, and ML trials into the separate IFQuant-Platform successor repository |
 | [`RUN_ROOT_INVENTORY_2026-08-25.md`](RUN_ROOT_INVENTORY_2026-08-25.md) | **READ-ONLY STRUCTURAL AUDIT** | sanitized inventory of relocated confocal, WSI, and H&E run artifacts and the authority rules derived from them |
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | **NARRATIVE HANDOFF** | historical locations, provisional operating point, corrected endpoint, open debt, and decisions; subordinate to the generated authority |
 | [`NEGATIVE_RESULTS.md`](NEGATIVE_RESULTS.md) | **VALIDATED** | AGER and KRT8 tested as discriminators and rejected, with the control-locked enrichment test that did it |

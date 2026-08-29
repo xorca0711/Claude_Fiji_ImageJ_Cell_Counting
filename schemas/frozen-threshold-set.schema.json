@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xorca0711/IFQuant-Lung/schemas/frozen-threshold-set.schema.json",
+  "title": "IFQuant frozen threshold set",
+  "description": "Scope-bound numerical threshold bindings for one exact scientific-definition hash. This artifact conveys no authorization or scientific promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "threshold_set_type",
+    "threshold_set_id",
+    "threshold_set_version",
+    "scientific_definition",
+    "applicability",
+    "thresholds"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://github.com/xorca0711/IFQuant-Lung/schemas/frozen-threshold-set.schema.json"
+    },
+    "schema_version": { "const": "1.0.0" },
+    "threshold_set_type": { "const": "ifquant_frozen_threshold_set" },
+    "threshold_set_id": { "$ref": "#/$defs/nonEmptyString" },
+    "threshold_set_version": { "$ref": "#/$defs/semanticVersion" },
+    "scientific_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition_id",
+        "definition_version",
+        "canonical_sha256"
+      ],
+      "properties": {
+        "definition_id": { "$ref": "#/$defs/nonEmptyString" },
+        "definition_version": { "$ref": "#/$defs/semanticVersion" },
+        "canonical_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_id",
+        "scope_binding",
+        "scope_profile_sha256",
+        "intensity_representation",
+        "bit_depth",
+        "intensity_transform",
+        "transfer_policy"
+      ],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nonEmptyString" },
+        "scope_binding": {
+          "enum": ["identifier_only_unattested", "content_addressed_profile"]
+        },
+        "scope_profile_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "intensity_representation": { "const": "unsigned_integer" },
+        "bit_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "intensity_transform": { "const": "none" },
+        "transfer_policy": { "const": "declared_scope_only" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope_binding": { "const": "identifier_only_unattested" }
+            },
+            "required": ["scope_binding"]
+          },
+          "then": {
+            "properties": { "scope_profile_sha256": { "type": "null" } }
+          },
+          "else": {
+            "properties": {
+              "scope_profile_sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      ]
+    },
+    "thresholds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/threshold" }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "threshold_parameter_id",
+        "marker_id",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "threshold_parameter_id": { "$ref": "#/$defs/nonEmptyString" },
+        "marker_id": { "$ref": "#/$defs/nonEmptyString" },
+        "value": { "type": "integer", "minimum": 0 },
+        "unit": { "const": "native_sample_value" }
+      }
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://github.com/xorca0711/IFQuant-Lung/schemas/scientific-measurement-definition.schema.json",
+  "schema_version": "1.0.0",
+  "definition_type": "ifquant_scientific_measurement_definition",
+  "definition_id": "krt5_positive_area_kernel",
+  "definition_version": "1.0.0",
+  "measurement_kind": "area_fraction",
+  "input_semantics": {
+    "dimensionality": "2d",
+    "plane_policy": "already_2d",
+    "intensity_coordinate": "native_sample_value",
+    "intensity_representation": "unsigned_integer",
+    "intensity_transform": "none",
+    "pixel_calibration": "required_axis_specific_source_metadata",
+    "pixel_area_unit": "um2",
+    "semantic_inputs": [
+      {
+        "input_id": "krt5_signal",
+        "marker_id": "KRT5"
+      }
+    ]
+  },
+  "processing_frame": {
+    "mask_construction_extent": "complete_supplied_plane_including_halo_if_present",
+    "reference_intersection": "after_component_filtering"
+  },
+  "reference_space": {
+    "reference_space_id": "measurement_roi_v1",
+    "source": "canonical_binary_mask",
+    "artifact_role": "reference_space_mask",
+    "background_value": 0,
+    "foreground_value": 255,
+    "foreground_semantics": "included_measurement_area"
+  },
+  "endpoint": {
+    "endpoint_id": "thresholded_total_KRT5_area_fraction",
+    "calculation": "ratio",
+    "numerator_unit": "um2",
+    "denominator_unit": "um2",
+    "result_unit": "fraction",
+    "denominator_source": "reference_space",
+    "zero_numerator_policy": "observed_zero",
+    "zero_denominator_policy": "not_evaluable",
+    "numerator_pipeline": [
+      {
+        "operation": "select_input",
+        "parameters": {
+          "input_id": "krt5_signal"
+        }
+      },
+      {
+        "operation": "gaussian_blur",
+        "parameters": {
+          "sigma_x_pixels": 2,
+          "sigma_y_pixels": 2,
+          "border_mode": "nearest",
+          "kernel_accuracy": 0.0002,
+          "intermediate_precision": "float32",
+          "output_quantization": "source_type"
+        }
+      },
+      {
+        "operation": "apply_frozen_threshold",
+        "parameters": {
+          "threshold_parameter_id": "krt5_positive_intensity",
+          "comparison": "greater_than_or_equal",
+          "foreground": "bright"
+        }
+      },
+      {
+        "operation": "connected_component_filter",
+        "parameters": {
+          "connectivity": 8,
+          "minimum_area_um2": 50,
+          "maximum_area_um2": null,
+          "minimum_boundary": "inclusive",
+          "maximum_boundary": null,
+          "processing_extent": "complete_supplied_plane_including_halo_if_present",
+          "edge_policy": "include"
+        }
+      },
+      {
+        "operation": "intersect_reference_space",
+        "parameters": {
+          "reference_space_id": "measurement_roi_v1"
+        }
+      }
+    ],
+    "aggregation": {
+      "method": "ratio_of_sums"
+    }
+  }
+}

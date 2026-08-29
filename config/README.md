@@ -1,5 +1,24 @@
 # Configuration assets
 
+## Backend-neutral measurement contracts
+
+- [`measurement_definitions/krt5_positive_area_kernel_v1.json`](measurement_definitions/krt5_positive_area_kernel_v1.json)
+  is the pure numerical KRT5 area kernel. It contains no threshold value,
+  acquisition-channel mapping, backend, runtime, lifecycle, or claim prose.
+- [`measurement_definitions/g_surf_confocal_260808_krt5_threshold_candidate_v1.json`](measurement_definitions/g_surf_confocal_260808_krt5_threshold_candidate_v1.json)
+  binds threshold 300 to the exact scientific-definition hash and declares a
+  narrow uint16 confocal reconstruction scope. Its scope-binding state is
+  `identifier_only_unattested`: no acquisition bytes or scope profile are bound.
+  It has no authorization and must not be used for WSI or transferred to
+  another acquisition regime.
+
+The schemas live under [`../schemas/`](../schemas/), the resolver is
+[`../ifquant/measurement_definition.py`](../ifquant/measurement_definition.py),
+and the full interpretation boundary and next-stage design are in
+[`../docs/ARCHITECTURE_VNEXT.md`](../docs/ARCHITECTURE_VNEXT.md). See the
+directory [`README`](measurement_definitions/README.md) for hashes, CLI usage,
+and the legacy endpoint-name crosswalk.
+
 ## Brightfield and study contracts
 
 - [`brightfield/he_decision_hierarchy.json`](brightfield/he_decision_hierarchy.json)
